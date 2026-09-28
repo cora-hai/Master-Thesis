@@ -1,3 +1,5 @@
 .gitignore
 /.venv
+openai_api_key.txt
+__pycache__
 data
