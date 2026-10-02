@@ -3,3 +3,6 @@
 openai_api_key.txt
 __pycache__
 data
+wandb_api_key.txt
+wandb
+models
