@@ -387,8 +387,9 @@ def train_and_evaluate(args):
 
         #run.log({"epoch": i+1, "Y val acc": y_acc, "Y val auroc": y_auroc, "Y val jaccard": y_jaccard, "C val mean acc": c_acc_mean, "C val jaccard": c_jaccard_mean, "C val F1": c_f1_mean})
 
-        print(f"y accuracy = {y_acc} | y auroc = {y_auroc} | y jaccard = {y_jaccard}")
-        print(f"mean concept acc = {c_acc_mean} | mean concept jaccard = {c_jaccard_mean}", flush = True)
+        if (i+1) % 5 == 0:
+            print(f"epoch {i+1} | y accuracy = {y_acc} | y auroc = {y_auroc} | y jaccard = {y_jaccard}")
+            print(f"epoch {i+1} | mean concept acc = {c_acc_mean} | mean concept jaccard = {c_jaccard_mean} | mean concept f1 = {c_f1_mean}", flush = True)
         # print(f"concept accuracies = {c_acc}", flush = True)
         # print(f"concept jaccards = {c_jaccard}", flush = True)
 
@@ -471,7 +472,7 @@ if __name__ == "__main__":
     ap.add_argument("--selector", type = str, nargs = "?", default = "no", help = "concept selection method")
     ap.add_argument("--loss-weight", type = float, nargs = "?", default = 1.0, help = "weight for joint loss function")
     ap.add_argument("--learning-rate", type = float, nargs = "?", default = 2e-4, help = "learning rate for model optimisation")
-    ap.add_argument("--dropout-p", type = float, nargs = "?", default = 0.0, help = "dropout probability for side channel regularisation")
+    ap.add_argument("--dropout-p", type = float, nargs = "?", default = 1.0, help = "dropout probability for side channel regularisation")
     ap.add_argument("--num-epochs", type = int, nargs = "?", default = 200, help = "number of epochs to train for")
     args = ap.parse_args()
 
