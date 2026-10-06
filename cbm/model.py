@@ -357,7 +357,7 @@ def train_and_evaluate(args):
                 XtoY_output, _, XtoC_output, _, _ = ModelXtoCtoY(embeddings)
 
                 # get concept and output predictions per batch
-                y_true.extend(batch.y)
+                y_true.extend(batch.y.cpu())
                 y_pred.extend((XtoY_output.squeeze().cpu() > 0.5).float())
                 c_true.append(batch.concepts.cpu().numpy().reshape(-1, num_concepts))
                 c_pred_binary = (XtoC_output.cpu() > 0.5).float()
@@ -419,7 +419,7 @@ def train_and_evaluate(args):
             XtoY_output, _, XtoC_output, CtoY_probs, SC_probs = ModelXtoCtoY(embeddings)
 
             # get concept and output predictions per batch
-            y_true.extend(batch.y)
+            y_true.extend(batch.y.cpu())
             y_pred.extend((XtoY_output.squeeze().cpu() > 0.5).float())
             y_pred_cbm.extend((CtoY_probs.squeeze().cpu() > 0.5).float())
             y_pred_sc.extend((SC_probs.squeeze().cpu() > 0.5).float())
