@@ -19,7 +19,7 @@ from fpmax import run_fpmax
 import argparse
 import pandas as pd 
 import numpy as np 
-import wandb
+#import wandb
 
 
 DEVICE = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
@@ -296,9 +296,9 @@ def train_and_evaluate(args):
     loss_y = torch.nn.BCELoss().to(DEVICE)  # X-C-Y loss
 
     ## configure W&B logging
-    config = args.__dict__
-    run = wandb.init(project = "CBM", config = config)
-    run.watch(ModelXtoCtoY, loss_y, log = "all", log_freq = 10)
+    # config = args.__dict__
+    # run = wandb.init(project = "CBM", config = config)
+    # run.watch(ModelXtoCtoY, loss_y, log = "all", log_freq = 10)
 
     ## train & validation loop ##
     best_acc_score = -1
@@ -336,10 +336,10 @@ def train_and_evaluate(args):
         c_loss_mean = np.mean(c_loss_list)
         joint_loss_mean = np.mean(joint_loss_list)
 
-        run.log({"epoch": i+1, "Y loss": y_loss_mean, "C loss": c_loss_mean})
+        #run.log({"epoch": i+1, "Y loss": y_loss_mean, "C loss": c_loss_mean})
 
-        if (i+1) % 5 == 0:
-            print(f"epoch {i + 1} | Y loss = {y_loss_mean} | C loss = {c_loss_mean} | joint loss = {joint_loss_mean}", flush = True)
+        # if (i+1) % 5 == 0:
+        #     print(f"epoch {i + 1} | Y loss = {y_loss_mean} | C loss = {c_loss_mean} | joint loss = {joint_loss_mean}", flush = True)
 
         # validation
         encoder.eval()
@@ -379,16 +379,16 @@ def train_and_evaluate(args):
         # record best validation accuracy & save best model config
         if y_acc > best_acc_score:
             best_acc_score = y_acc
-            # wandb.unwatch()
-            # torch.save(encoder, f'{args.output_dir}/encoder_gnn_{args.data_type}_{args.selector}_{args.loss_weight}.pth')
-            # torch.save(ModelXtoCtoY, f'{args.output_dir}/ModelXtoCtoY_gnn_{args.data_type}_{args.selector}_{args.loss_weight}.pth')
-            best_encoder = encoder
-            best_ModelXtoCtoY = ModelXtoCtoY
+            #wandb.unwatch()
+            torch.save(encoder, f'{args.output_dir}/encoder_gnn_{args.data_type}_{args.selector}_{args.loss_weight}.pth')
+            torch.save(ModelXtoCtoY, f'{args.output_dir}/ModelXtoCtoY_gnn_{args.data_type}_{args.selector}_{args.loss_weight}.pth')
+            # best_encoder = encoder
+            # best_ModelXtoCtoY = ModelXtoCtoY
 
-        run.log({"epoch": i+1, "Y val acc": y_acc, "Y val auroc": y_auroc, "Y val jaccard": y_jaccard, "C val mean acc": c_acc_mean, "C val jaccard": c_jaccard_mean, "C val F1": c_f1_mean})
+        #run.log({"epoch": i+1, "Y val acc": y_acc, "Y val auroc": y_auroc, "Y val jaccard": y_jaccard, "C val mean acc": c_acc_mean, "C val jaccard": c_jaccard_mean, "C val F1": c_f1_mean})
 
-        # print(f"y accuracy = {y_acc} | y auroc = {y_auroc} | y jaccard = {y_jaccard}")
-        # print(f"mean concept acc = {c_acc_mean} | mean concept jaccard = {c_jaccard_mean}", flush = True)
+        print(f"y accuracy = {y_acc} | y auroc = {y_auroc} | y jaccard = {y_jaccard}")
+        print(f"mean concept acc = {c_acc_mean} | mean concept jaccard = {c_jaccard_mean}", flush = True)
         # print(f"concept accuracies = {c_acc}", flush = True)
         # print(f"concept jaccards = {c_jaccard}", flush = True)
 
@@ -398,10 +398,10 @@ def train_and_evaluate(args):
     # print(f"best model from epoch {best_epoch}")
 
     ## test loop ##
-    # encoder = torch.load(f'{args.output_dir}/encoder_gnn_{args.data_type}_{args.selector}_{args.loss_weight}.pth', weights_only = False)
-    # ModelXtoCtoY = torch.load(f'{args.output_dir}/ModelXtoCtoY_gnn_{args.data_type}_{args.selector}_{args.loss_weight}.pth', weights_only = False)
-    encoder = best_encoder
-    ModelXtoCtoY = best_ModelXtoCtoY
+    encoder = torch.load(f'{args.output_dir}/encoder_gnn_{args.data_type}_{args.selector}_{args.loss_weight}.pth', weights_only = False)
+    ModelXtoCtoY = torch.load(f'{args.output_dir}/ModelXtoCtoY_gnn_{args.data_type}_{args.selector}_{args.loss_weight}.pth', weights_only = False)
+    # encoder = best_encoder
+    # ModelXtoCtoY = best_ModelXtoCtoY
     encoder.eval()
     ModelXtoCtoY.eval()
     c_pred = []
@@ -454,6 +454,11 @@ def train_and_evaluate(args):
     print(f"test concept jaccards: {list(test_c_jaccard)}", flush = True)
     print(f"test concept F1: {list(test_c_f1)}", flush = True)
 
+    # get weights per concept
+    concept_weights = ModelXtoCtoY.c2y.linear.weight.detach().cpu().numpy()
+    concept_weights_df = pd.DataFrame(concept_weights, columns = features)
+    weight_file = f"{args.output_dir}/ModelXtoCtoY_gnn_{args.data_type}_{args.selector}_concept_weights.csv"
+    concept_weights_df.to_csv(weight_file, index = False)
 
     return {"Y test acc": test_y_acc, "Y test auroc": test_y_auroc, "C test acc": test_c_acc_mean}
 
@@ -470,7 +475,7 @@ if __name__ == "__main__":
     ap.add_argument("--num-epochs", type = int, nargs = "?", default = 200, help = "number of epochs to train for")
     args = ap.parse_args()
 
-    wandb.login()
+    #wandb.login()
 
     # logs = {}
     # for i in range(1, 21):

@@ -6,3 +6,6 @@ data
 wandb_api_key.txt
 wandb
 models
+glassmol
+classic_ml_methods
+requirements.txt
