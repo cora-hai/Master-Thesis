@@ -190,9 +190,9 @@ def train_and_evaluate(args):
 
     ## load data ##
     DATA = {}
-    DATA["train"] = pd.read_csv(f"{args.data_dir}/train.csv")
-    DATA["val"] = pd.read_csv(f"{args.data_dir}/val.csv")
-    DATA["test"] = pd.read_csv(f"{args.data_dir}/test.csv")
+    DATA["train"] = pd.read_csv(f"{args.data_dir}/train_{args.data_type}.csv")
+    DATA["val"] = pd.read_csv(f"{args.data_dir}/val_{args.data_type}.csv")
+    DATA["test"] = pd.read_csv(f"{args.data_dir}/test_{args.data_type}.csv")
 
 
     ## select concepts ##
