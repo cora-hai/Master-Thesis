@@ -186,7 +186,7 @@ def attach_y_and_concepts(row, features):
 
 def train_and_evaluate(args):
 
-    print(args.loss_weight)
+    #print(args.loss_weight)
 
     ## load data ##
     DATA = {}
@@ -363,18 +363,20 @@ def train_and_evaluate(args):
                 c_pred_binary = (XtoC_output.cpu() > 0.5).float()
                 c_pred.append(c_pred_binary)
 
-        # calculate concept and output accuracies
-        c_true_all = np.vstack(c_true)
-        c_pred_all = np.vstack(c_pred)
+        # calculate concept and output accuracies (most of the only every 10th epoch)
         y_acc = accuracy_score(y_true, y_pred)
-        y_auroc = roc_auc_score(y_true, y_pred)
-        y_jaccard = jaccard_score(y_true, y_pred, zero_division = 0.0)
-        c_acc = (c_pred_all == c_true_all).mean(axis = 0).tolist()
-        c_acc_mean = np.mean(c_acc)
-        c_jaccard = jaccard_score(c_true_all, c_pred_all, average = None, zero_division = 0.0)
-        c_jaccard_mean = np.mean(c_jaccard)
-        c_f1 = f1_score(c_true_all, c_pred_all, average = None, zero_division = 0)
-        c_f1_mean = np.mean(c_f1)
+
+        if (i+1) % 10 == 0:
+            c_true_all = np.vstack(c_true)
+            c_pred_all = np.vstack(c_pred)
+            y_auroc = roc_auc_score(y_true, y_pred)
+            y_jaccard = jaccard_score(y_true, y_pred, zero_division = 0.0)
+            c_acc = (c_pred_all == c_true_all).mean(axis = 0).tolist()
+            c_acc_mean = np.mean(c_acc)
+            c_jaccard = jaccard_score(c_true_all, c_pred_all, average = None, zero_division = 0.0)
+            c_jaccard_mean = np.mean(c_jaccard)
+            c_f1 = f1_score(c_true_all, c_pred_all, average = None, zero_division = 0)
+            c_f1_mean = np.mean(c_f1)
 
         # record best validation accuracy & save best model config
         if y_acc > best_acc_score:
@@ -387,7 +389,7 @@ def train_and_evaluate(args):
 
         #run.log({"epoch": i+1, "Y val acc": y_acc, "Y val auroc": y_auroc, "Y val jaccard": y_jaccard, "C val mean acc": c_acc_mean, "C val jaccard": c_jaccard_mean, "C val F1": c_f1_mean})
 
-        if (i+1) % 5 == 0:
+        if (i+1) % 10 == 0:
             print(f"epoch {i+1} | y accuracy = {y_acc} | y auroc = {y_auroc} | y jaccard = {y_jaccard}")
             print(f"epoch {i+1} | mean concept acc = {c_acc_mean} | mean concept jaccard = {c_jaccard_mean} | mean concept f1 = {c_f1_mean}", flush = True)
         # print(f"concept accuracies = {c_acc}", flush = True)
