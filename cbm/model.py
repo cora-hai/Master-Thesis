@@ -97,8 +97,8 @@ class FC(nn.Module):
     def __init__(self, input_dim, hidden_dim = 768*2) -> None:
         super(FC, self).__init__()
         self.stack = nn.Sequential(
-            nn.Linear(input_dim, hidden_dim),
-            nn.ReLU(),
+            # nn.Linear(input_dim, hidden_dim),
+            # nn.ReLU(),
             nn.Linear(hidden_dim, 1)
         )
 
