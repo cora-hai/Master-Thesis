@@ -1,6 +1,7 @@
 # models + training
 import torch
 import torch.nn as nn
+from torch import Tensor
 from torch.utils.data import Dataset
 from torch_geometric.loader import DataLoader
 from torch_geometric.nn import GINEConv, global_add_pool
@@ -99,7 +100,7 @@ class FC(nn.Module):
         self.stack = nn.Sequential(
             # nn.Linear(input_dim, hidden_dim),
             # nn.ReLU(),
-            nn.Linear(hidden_dim, 1)
+            nn.Linear(input_dim, 1)
         )
 
     def forward(self, x):
@@ -129,6 +130,31 @@ class SideChannel(nn.Module):
 
     def forward(self, x):
         return self.stack(x)
+
+
+def gumbel_sigmoid(logits: Tensor, tau: float = 1, hard: bool = False, threshold: float = 0.5) -> Tensor:
+    # gradient approximation for binary concept neurons, based on
+    # 1. https://github.com/pytorch/pytorch/blob/v2.14.0/torch/nn/functional.py#L2219
+    # 2. https://github.com/AngelosNal/PyTorch-Gumbel-Sigmoid/tree/main
+    
+    gumbels = (
+        -torch.empty_like(logits, memory_format=torch.legacy_contiguous_format)
+        .exponential_()
+        .log()
+    )  # ~Gumbel(0,1)
+    gumbels = (logits + gumbels) / tau  # ~Gumbel(logits,tau)
+    y_soft = gumbels.sigmoid()
+
+    if hard:
+        # Straight through.
+        indices = (y_soft > threshold).nonzero(as_tuple=True)
+        y_hard = torch.zeros_like(logits, memory_format=torch.legacy_contiguous_format)
+        y_hard[indices[0], indices[1]] = 1.0
+        ret = y_hard - y_soft.detach() + y_soft
+    else:
+        # Reparametrization trick.
+        ret = y_soft
+    return ret
         
 
 # full model
@@ -143,30 +169,35 @@ class XtoCtoY(nn.Module):
 
     def forward(self, x):
 
-        # predict c
+        # predict c with Gumbel Sigmoid for handling gradient approximation
         c_logits_pre = self.x2c(x)
         c_logits = torch.transpose(torch.stack(c_logits_pre, dim = 0), 0, 1)
         c_logits = c_logits.reshape(-1, self.num_concepts)
-        c_probs = self.sigmoid(c_logits)
+        #c_preds = self.sigmoid(c_logits)
+        c_preds = gumbel_sigmoid(c_logits, hard = True)
 
         # get side channel output
-        y_logits_sc = self.sc(x)
+        logits_sc = self.sc(x)
 
-        # get CBM output
-        y_logits_cbm = torch.stack([self.c2y(c_probs[i]) for i in range(c_probs.size(0))], dim = 0)
+        # concatenate C-C and SC outputs to feed into C-Y layer
+        concat = torch.cat((c_preds, logits_sc), dim = 1)
 
-        # get joint prediction
-        y_pred = self.sigmoid(y_logits_cbm + y_logits_sc)
-        y_pred_cbm = self.sigmoid(y_logits_cbm)
-        y_pred_sc = self.sigmoid(y_logits_sc)
+        # get C-Y logits + prediction
+        y_logits = torch.stack([self.c2y(concat[i]) for i in range(concat.size(0))], dim = 0) 
+        y_pred = self.sigmoid(y_logits)
 
-        return [y_pred, c_logits_pre, c_probs, y_pred_cbm, y_pred_sc]
+        # get pure CBM and SC predictions for explanation purposes
+        # y_logits_cbm = torch.stack([self.c2y(c_preds[i]) for i in range(c_preds.size(0))], dim = 0)
+        # y_pred_cbm = self.sigmoid(y_logits_cbm)
+        y_pred_sc = self.sigmoid(logits_sc)
+
+        return [y_pred, c_logits_pre, c_preds, y_pred_sc]
 
 # function for calling full model
 def full_cbm(num_concepts, in_dims = 768) -> XtoCtoY:
     x2c_layer = XtoC(num_concepts = num_concepts, in_dims = in_dims)
-    c2y_layer = CtoY(input_dim = num_concepts)
-    side_channel = SideChannel(input_dim = in_dims, p_drop = args.dropout_p)
+    c2y_layer = CtoY(input_dim = num_concepts + args.sc_out_dim)
+    side_channel = SideChannel(input_dim = in_dims, out_dim = args.sc_out_dim, p_drop = args.dropout_p)
     return XtoCtoY(x2c = x2c_layer, c2y = c2y_layer, side_channel = side_channel, num_concepts = num_concepts)
 
 # molecules are PyG objects, so we need to attach the y and concepts to the object
@@ -316,7 +347,7 @@ def train_and_evaluate(args):
 
             # run GNN encoding + CBM
             embeddings = encoder(batch)
-            XtoY_output, XtoC_logits, _, _, _ = ModelXtoCtoY(embeddings)
+            XtoY_output, XtoC_logits, _, _ = ModelXtoCtoY(embeddings)
 
             # loss calculation + backpropagation
             XtoC_logits = torch.stack(XtoC_logits, dim=1).squeeze()
@@ -354,7 +385,7 @@ def train_and_evaluate(args):
 
                 # run GNN encoding + CBM
                 embeddings = encoder(batch)
-                XtoY_output, _, XtoC_output, _, _ = ModelXtoCtoY(embeddings)
+                XtoY_output, _, XtoC_output, _ = ModelXtoCtoY(embeddings)
 
                 # get concept and output predictions per batch
                 y_true.extend(batch.y.cpu())
@@ -409,8 +440,8 @@ def train_and_evaluate(args):
     ModelXtoCtoY.eval()
     c_pred = []
     y_pred = []
-    y_pred_cbm = []
-    y_pred_sc = []
+    #y_pred_cbm = []
+    #y_pred_sc = []
     c_true = []
     y_true = []
     with torch.no_grad():
@@ -419,13 +450,13 @@ def train_and_evaluate(args):
 
             # run GNN encoding + CBM
             embeddings = encoder(batch)
-            XtoY_output, _, XtoC_output, CtoY_probs, SC_probs = ModelXtoCtoY(embeddings)
+            XtoY_output, _, XtoC_output, SC_probs = ModelXtoCtoY(embeddings)
 
             # get concept and output predictions per batch
             y_true.extend(batch.y.cpu())
             y_pred.extend((XtoY_output.squeeze().cpu() > 0.5).float())
-            y_pred_cbm.extend((CtoY_probs.squeeze().cpu() > 0.5).float())
-            y_pred_sc.extend((SC_probs.squeeze().cpu() > 0.5).float())
+            #y_pred_cbm.extend((CtoY_probs.squeeze().cpu() > 0.5).float())
+            #y_pred_sc.extend((SC_probs.squeeze().cpu() > 0.5).float())
             c_true.append(batch.concepts.cpu().numpy().reshape(-1, num_concepts))
             c_pred_binary = (XtoC_output.cpu() > 0.5).float()
             c_pred.append(c_pred_binary)
@@ -434,20 +465,20 @@ def train_and_evaluate(args):
     c_true_all = np.vstack(c_true)
     c_pred_all = np.vstack(c_pred)
     test_y_acc = accuracy_score(y_true, y_pred)
-    test_y_acc_cbm = accuracy_score(y_true, y_pred_cbm)
-    test_y_acc_sc = accuracy_score(y_true, y_pred_sc)
+    #test_y_acc_cbm = accuracy_score(y_true, y_pred_cbm)
+    #test_y_acc_sc = accuracy_score(y_true, y_pred_sc)
     test_y_auroc = roc_auc_score(y_true, y_pred)
     test_y_jaccard = jaccard_score(y_true, y_pred, zero_division = 0.0)
     test_c_acc = (c_pred_all == c_true_all).mean(axis = 0).tolist()
-    test_c_acc_mean = np.mean(c_acc)
+    test_c_acc_mean = np.mean(test_c_acc)
     test_c_jaccard = jaccard_score(c_true_all, c_pred_all, average = None, zero_division = 0.0)
     test_c_jaccard_mean = np.mean(test_c_jaccard)
     test_c_f1 = f1_score(c_true_all, c_pred_all, average = None, zero_division = 0)
-    test_c_f1_mean = np.mean(c_f1)
+    test_c_f1_mean = np.mean(test_c_f1)
       
     print(f"test y accuracy \t {test_y_acc}", flush = True)
-    print(f"test y accuracy CBM \t {test_y_acc_cbm}", flush = True)
-    print(f"test y accuracy SC \t {test_y_acc_sc}", flush = True)
+    #print(f"test y accuracy CBM \t {test_y_acc_cbm}", flush = True)
+    #print(f"test y accuracy SC \t {test_y_acc_sc}", flush = True)
     print(f"test y auroc \t {test_y_auroc}", flush = True)
     print(f"test y jaccard \t {test_y_jaccard}")
     print(f"test mean concept acc \t {test_c_acc_mean}", flush = True)
@@ -459,7 +490,7 @@ def train_and_evaluate(args):
 
     # get weights per concept
     concept_weights = ModelXtoCtoY.c2y.linear.weight.detach().cpu().numpy()
-    concept_weights_df = pd.DataFrame(concept_weights, columns = features)
+    concept_weights_df = pd.DataFrame(concept_weights, columns = features + [f"sc_{i+1}" for i in range(args.sc_out_dim)])
     weight_file = f"{args.output_dir}/ModelXtoCtoY_gnn_{args.data_type}_{args.selector}_concept_weights.csv"
     concept_weights_df.to_csv(weight_file, index = False)
 
@@ -475,6 +506,7 @@ if __name__ == "__main__":
     ap.add_argument("--loss-weight", type = float, nargs = "?", default = 1.0, help = "weight for joint loss function")
     ap.add_argument("--learning-rate", type = float, nargs = "?", default = 2e-4, help = "learning rate for model optimisation")
     ap.add_argument("--dropout-p", type = float, nargs = "?", default = 1.0, help = "dropout probability for side channel regularisation")
+    ap.add_argument("--sc-out-dim", type = int, nargs = "?", default = 1, help = "number of nodes in side channel output")
     ap.add_argument("--num-epochs", type = int, nargs = "?", default = 200, help = "number of epochs to train for")
     args = ap.parse_args()
 
