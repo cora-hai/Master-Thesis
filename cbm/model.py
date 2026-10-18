@@ -20,6 +20,7 @@ from fpmax import run_fpmax
 import argparse
 import pandas as pd 
 import numpy as np 
+from utils import set_seed
 #import wandb
 
 
@@ -508,17 +509,11 @@ if __name__ == "__main__":
     ap.add_argument("--dropout-p", type = float, nargs = "?", default = 1.0, help = "dropout probability for side channel regularisation")
     ap.add_argument("--sc-out-dim", type = int, nargs = "?", default = 1, help = "number of nodes in side channel output")
     ap.add_argument("--num-epochs", type = int, nargs = "?", default = 200, help = "number of epochs to train for")
+    ap.add_argument("--seed", type = int, nargs = "?", default = 27, help = "random seed for reproducibility")
     args = ap.parse_args()
 
     #wandb.login()
 
-    # logs = {}
-    # for i in range(1, 21):
-    #     lw = i/10
-    #     args.loss_weight = lw
-    #     logs[str(lw)] = train_and_evaluate(args)
-
-    # with open("logs_out_no-sc.txt", "w", encoding = "utf-8") as f:
-    #     f.write(str(logs))
+    set_seed(args.seed)
 
     train_and_evaluate(args)
