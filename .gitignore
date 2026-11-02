@@ -9,3 +9,5 @@ models
 glassmol
 classic_ml_methods
 requirements.txt
+feature_attribution_out
+molecule_substructure_images

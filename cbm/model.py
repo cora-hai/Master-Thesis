@@ -160,12 +160,13 @@ def gumbel_sigmoid(logits: Tensor, tau: float = 1, hard: bool = False, threshold
 
 # full model
 class XtoCtoY(nn.Module):
-    def __init__(self, x2c, c2y, side_channel = None, sc_hard = False, num_concepts = 0):
+    def __init__(self, x2c, c2y, side_channel = None, sc_hard = False, num_concepts = 0, sc_out_dim = 0):
         super(XtoCtoY, self).__init__()
         self.x2c = x2c
         self.c2y = c2y
         self.sc = side_channel
         self.sc_hard = sc_hard
+        self.sc_out_dim = sc_out_dim
         self.num_concepts = num_concepts
         self.sigmoid = nn.Sigmoid()
 
@@ -200,17 +201,25 @@ class XtoCtoY(nn.Module):
             y_pred = self.sigmoid(y_logits)
             y_pred_sc = None
 
-        return [y_pred, c_logits_pre, c_preds, y_pred_sc]
+        # get prediction solely based on concept prediction for comparison
+        if self.sc:
+            padding_tensor = torch.zeros(self.sc_out_dim)
+            y_logits_cb = torch.stack([self.c2y(torch.cat([c_preds[i], padding_tensor], dim = -1)) for i in range(c_preds.size(0))], dim = 0)
+        else:
+            y_logits_cb = torch.stack([self.c2y(c_preds[i]) for i in range(c_preds.size(0))], dim = 0)
+        y_pred_cb = self.sigmoid(y_logits_cb)
+
+        return [y_pred, c_logits_pre, c_preds, y_pred_sc, y_pred_cb]
 
 # function for calling full model
-def full_cbm(num_concepts, in_dims = 768, side_channel = False, sc_hard = False) -> XtoCtoY:
+def full_cbm(num_concepts, in_dims = 768, side_channel = False, sc_hard = False, sc_out_dim = 0) -> XtoCtoY:
     x2c_layer = XtoC(num_concepts = num_concepts, in_dims = in_dims)
     c2y_layer = CtoY(input_dim = num_concepts + args.sc_out_dim)
     if side_channel:
         sc = SideChannel(input_dim = in_dims, out_dim = args.sc_out_dim, p_drop = args.dropout_p)
-        return XtoCtoY(x2c = x2c_layer, c2y = c2y_layer, side_channel = sc, sc_hard = sc_hard, num_concepts = num_concepts)
+        return XtoCtoY(x2c = x2c_layer, c2y = c2y_layer, side_channel = sc, sc_hard = sc_hard, num_concepts = num_concepts, sc_out_dim = sc_out_dim)
     else:
-        return XtoCtoY(x2c = x2c_layer, c2y = c2y_layer, side_channel = None, sc_hard = sc_hard, num_concepts = num_concepts)
+        return XtoCtoY(x2c = x2c_layer, c2y = c2y_layer, side_channel = None, num_concepts = num_concepts)
 
 # molecules are PyG objects, so we need to attach the y and concepts to the object
 def attach_y_and_concepts(row, features):
@@ -332,7 +341,7 @@ def train_and_evaluate(args):
 
 
     ## initialise everything ##
-    ModelXtoCtoY = full_cbm(num_concepts, side_channel = args.side_channel, sc_hard = args.hard_sc).to(DEVICE)
+    ModelXtoCtoY = full_cbm(num_concepts, side_channel = args.side_channel, sc_hard = args.hard_sc, sc_out_dim = args.sc_out_dim).to(DEVICE)
     encoder = MolNet(in_channels=DATA["train"]['Drug'][1].x.shape[1], hidden_channels=768).to(DEVICE)
     optimiser = torch.optim.Adam(list(encoder.parameters()) + list(ModelXtoCtoY.parameters()), lr = args.learning_rate)
     loss_c = torch.nn.BCEWithLogitsLoss(pos_weight = pos_weight_tensor).to(DEVICE)  # weighted concept loss
@@ -359,7 +368,7 @@ def train_and_evaluate(args):
 
             # run GNN encoding + CBM
             embeddings = encoder(batch)
-            XtoY_output, XtoC_logits, _, _ = ModelXtoCtoY(embeddings)
+            XtoY_output, XtoC_logits, _, _, _ = ModelXtoCtoY(embeddings)
 
             # loss calculation + backpropagation
             XtoC_logits = torch.stack(XtoC_logits, dim=1).squeeze()
@@ -397,7 +406,7 @@ def train_and_evaluate(args):
 
                 # run GNN encoding + CBM
                 embeddings = encoder(batch)
-                XtoY_output, _, XtoC_output, _ = ModelXtoCtoY(embeddings)
+                XtoY_output, _, XtoC_output, _, _ = ModelXtoCtoY(embeddings)
 
                 # get concept and output predictions per batch
                 y_true.extend(batch.y.cpu())
@@ -452,8 +461,8 @@ def train_and_evaluate(args):
     ModelXtoCtoY.eval()
     c_pred = []
     y_pred = []
-    #y_pred_cbm = []
-    #y_pred_sc = []
+    y_pred_cbm = []
+    y_pred_sc = []
     c_true = []
     y_true = []
     with torch.no_grad():
@@ -462,13 +471,13 @@ def train_and_evaluate(args):
 
             # run GNN encoding + CBM
             embeddings = encoder(batch)
-            XtoY_output, _, XtoC_output, SC_probs = ModelXtoCtoY(embeddings)
+            XtoY_output, _, XtoC_output, SC_task_output, CBM_task_output = ModelXtoCtoY(embeddings)
 
             # get concept and output predictions per batch
             y_true.extend(batch.y.cpu())
             y_pred.extend((XtoY_output.squeeze().cpu() > 0.5).float())
-            #y_pred_cbm.extend((CtoY_probs.squeeze().cpu() > 0.5).float())
-            #y_pred_sc.extend((SC_probs.squeeze().cpu() > 0.5).float())
+            y_pred_cbm.extend((CBM_task_output.squeeze().cpu() > 0.5).float())
+            y_pred_sc.extend((SC_task_output.squeeze().cpu() > 0.5).float())
             c_true.append(batch.concepts.cpu().numpy().reshape(-1, num_concepts))
             c_pred_binary = (XtoC_output.cpu() > 0.5).float()
             c_pred.append(c_pred_binary)
@@ -477,10 +486,14 @@ def train_and_evaluate(args):
     c_true_all = np.vstack(c_true)
     c_pred_all = np.vstack(c_pred)
     test_y_acc = accuracy_score(y_true, y_pred)
-    #test_y_acc_cbm = accuracy_score(y_true, y_pred_cbm)
-    #test_y_acc_sc = accuracy_score(y_true, y_pred_sc)
+    test_y_acc_cbm = accuracy_score(y_true, y_pred_cbm)
+    test_y_acc_sc = accuracy_score(y_true, y_pred_sc)
     test_y_auroc = roc_auc_score(y_true, y_pred)
+    test_y_auroc_cbm = roc_auc_score(y_true, y_pred_cbm)
+    test_y_auroc_sc = roc_auc_score(y_true, y_pred_sc)
     test_y_jaccard = jaccard_score(y_true, y_pred, zero_division = 0.0)
+    test_y_jaccard_cbm = jaccard_score(y_true, y_pred_cbm, zero_division = 0.0)
+    test_y_jaccard_sc = jaccard_score(y_true, y_pred_sc, zero_division = 0.0)
     test_c_acc = (c_pred_all == c_true_all).mean(axis = 0).tolist()
     test_c_acc_mean = np.mean(test_c_acc)
     test_c_jaccard = jaccard_score(c_true_all, c_pred_all, average = None, zero_division = 0.0)
@@ -489,10 +502,14 @@ def train_and_evaluate(args):
     test_c_f1_mean = np.mean(test_c_f1)
       
     print(f"test y accuracy = {test_y_acc}", flush = True)
-    #print(f"test y accuracy CBM \t {test_y_acc_cbm}", flush = True)
-    #print(f"test y accuracy SC \t {test_y_acc_sc}", flush = True)
+    print(f"test y accuracy CBM = {test_y_acc_cbm}", flush = True)
+    print(f"test y accuracy SC = {test_y_acc_sc}", flush = True)
     print(f"test y auroc = {test_y_auroc}", flush = True)
-    print(f"test y jaccard = {test_y_jaccard}")
+    print(f"test y auroc CBM = {test_y_auroc_cbm}", flush = True)
+    print(f"test y auroc SC = {test_y_auroc_sc}", flush = True)
+    print(f"test y jaccard = {test_y_jaccard}", flush = True)
+    print(f"test y jaccard CBM = {test_y_jaccard_cbm}", flush = True)
+    print(f"test y jaccard SC = {test_y_jaccard_sc}", flush = True)
     print(f"test mean concept acc = {test_c_acc_mean}", flush = True)
     print(f"test mean concept jaccard = {test_c_jaccard_mean}", flush = True)
     print(f"test mean concept F1 = {test_c_f1_mean}", flush = True)
