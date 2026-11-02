@@ -160,11 +160,12 @@ def gumbel_sigmoid(logits: Tensor, tau: float = 1, hard: bool = False, threshold
 
 # full model
 class XtoCtoY(nn.Module):
-    def __init__(self, x2c, c2y, side_channel, num_concepts):
+    def __init__(self, x2c, c2y, side_channel = None, sc_hard = False, num_concepts = 0):
         super(XtoCtoY, self).__init__()
         self.x2c = x2c
         self.c2y = c2y
         self.sc = side_channel
+        self.sc_hard = sc_hard
         self.num_concepts = num_concepts
         self.sigmoid = nn.Sigmoid()
 
@@ -180,18 +181,19 @@ class XtoCtoY(nn.Module):
         if self.sc:
             # get side channel output
             logits_sc = self.sc(x)
-
+            
             # concatenate C-C and SC outputs to feed into C-Y layer
-            concat = torch.cat((c_preds, logits_sc), dim = 1)
-
+            if self.sc_hard:    # binary side channel output
+                preds_sc = gumbel_sigmoid(logits_sc, hard = True)
+                concat = torch.cat((c_preds, preds_sc), dim = 1)
+                y_pred_sc = self.sigmoid(preds_sc)  # SC output for feature attribution
+            else:   # logit side channel output
+                concat = torch.cat((c_preds, logits_sc), dim = 1)
+                y_pred_sc = self.sigmoid(logits_sc) # Sc output for feature attribution
+            
             # get C-Y logits + prediction
             y_logits = torch.stack([self.c2y(concat[i]) for i in range(concat.size(0))], dim = 0) 
             y_pred = self.sigmoid(y_logits)
-
-            # get pure CBM and SC predictions for explanation purposes
-            # y_logits_cbm = torch.stack([self.c2y(c_preds[i]) for i in range(c_preds.size(0))], dim = 0)
-            # y_pred_cbm = self.sigmoid(y_logits_cbm)
-            y_pred_sc = self.sigmoid(logits_sc)
 
         else:
             y_logits = torch.stack([self.c2y(c_preds[i]) for i in range(c_preds.size(0))], dim = 0) 
@@ -201,14 +203,14 @@ class XtoCtoY(nn.Module):
         return [y_pred, c_logits_pre, c_preds, y_pred_sc]
 
 # function for calling full model
-def full_cbm(num_concepts, in_dims = 768, side_channel = False) -> XtoCtoY:
+def full_cbm(num_concepts, in_dims = 768, side_channel = False, sc_hard = False) -> XtoCtoY:
     x2c_layer = XtoC(num_concepts = num_concepts, in_dims = in_dims)
     c2y_layer = CtoY(input_dim = num_concepts + args.sc_out_dim)
     if side_channel:
         sc = SideChannel(input_dim = in_dims, out_dim = args.sc_out_dim, p_drop = args.dropout_p)
-        return XtoCtoY(x2c = x2c_layer, c2y = c2y_layer, side_channel = sc, num_concepts = num_concepts)
+        return XtoCtoY(x2c = x2c_layer, c2y = c2y_layer, side_channel = sc, sc_hard = sc_hard, num_concepts = num_concepts)
     else:
-        return XtoCtoY(x2c = x2c_layer, c2y = c2y_layer, side_channel = None, num_concepts = num_concepts)
+        return XtoCtoY(x2c = x2c_layer, c2y = c2y_layer, side_channel = None, sc_hard = sc_hard, num_concepts = num_concepts)
 
 # molecules are PyG objects, so we need to attach the y and concepts to the object
 def attach_y_and_concepts(row, features):
@@ -330,7 +332,7 @@ def train_and_evaluate(args):
 
 
     ## initialise everything ##
-    ModelXtoCtoY = full_cbm(num_concepts, side_channel = args.side_channel).to(DEVICE)
+    ModelXtoCtoY = full_cbm(num_concepts, side_channel = args.side_channel, sc_hard = args.hard_sc).to(DEVICE)
     encoder = MolNet(in_channels=DATA["train"]['Drug'][1].x.shape[1], hidden_channels=768).to(DEVICE)
     optimiser = torch.optim.Adam(list(encoder.parameters()) + list(ModelXtoCtoY.parameters()), lr = args.learning_rate)
     loss_c = torch.nn.BCEWithLogitsLoss(pos_weight = pos_weight_tensor).to(DEVICE)  # weighted concept loss
@@ -513,11 +515,12 @@ if __name__ == "__main__":
     ap.add_argument("--data-type", type = str, help = "name of dataset")
     ap.add_argument("--output-dir", type = str, help = "path to directory where outputs and logs will be saved")
     ap.add_argument("--selector", type = str, nargs = "?", default = "no", help = "concept selection method")
-    ap.add_argument("--loss-weight", type = float, nargs = "?", default = 1.0, help = "weight for joint loss function")
+    ap.add_argument("--loss-weight", type = float, nargs = "?", default = 2.0, help = "weight for joint loss function")
     ap.add_argument("--learning-rate", type = float, nargs = "?", default = 2e-4, help = "learning rate for model optimisation")
     ap.add_argument("--side-channel", action = "store_true", help = "activate side channel usage")
+    ap.add_argument("--hard-sc", action = "store_true", help = "switch to binary side channel output instead of logits")
     ap.add_argument("--sc-out-dim", type = int, nargs = "?", default = 0, help = "number of nodes in side channel output")
-    ap.add_argument("--dropout-p", type = float, nargs = "?", default = 1.0, help = "dropout probability for side channel regularisation")
+    ap.add_argument("--dropout-p", type = float, nargs = "?", default = 0.0, help = "dropout probability for side channel regularisation")
     ap.add_argument("--num-epochs", type = int, nargs = "?", default = 200, help = "number of epochs to train for")
     ap.add_argument("--seed", type = int, nargs = "?", default = 27, help = "random seed for reproducibility")
     args = ap.parse_args()
