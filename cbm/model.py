@@ -201,7 +201,7 @@ class XtoCtoY(nn.Module):
 
         # get task prediction solely based on concept bottleneck predictions
         if self.sc:
-            padding_tensor = torch.zeros(self.sc_out_dim)
+            padding_tensor = torch.zeros(self.sc_out_dim).to(DEVICE)
             y_logits_cb = torch.stack([self.c2y(torch.cat([c_preds[i], padding_tensor], dim = -1)) for i in range(c_preds.size(0))], dim = 0)
         else:
             y_logits_cb = torch.stack([self.c2y(c_preds[i]) for i in range(c_preds.size(0))], dim = 0)
@@ -209,7 +209,7 @@ class XtoCtoY(nn.Module):
 
         # get task prediction solely based on side channel predictions
         if self.sc:
-            padding_tensor = torch.zeros(preds_sc.size(0), self.num_concepts)
+            padding_tensor = torch.zeros(preds_sc.size(0), self.num_concepts).to(DEVICE)
             y_logits_sc = self.c2y(torch.cat([padding_tensor, preds_sc], dim = -1))
             y_pred_sc = self.sigmoid(y_logits_sc)
         else:
