@@ -187,10 +187,9 @@ class XtoCtoY(nn.Module):
             if self.sc_hard:    # binary side channel output
                 preds_sc = gumbel_sigmoid(logits_sc, hard = True)
                 concat = torch.cat((c_preds, preds_sc), dim = 1)
-                y_pred_sc = self.sigmoid(preds_sc)  # SC output for feature attribution
             else:   # logit side channel output
                 concat = torch.cat((c_preds, logits_sc), dim = 1)
-                y_pred_sc = self.sigmoid(logits_sc) # Sc output for feature attribution
+                preds_sc = self.sigmoid(logits_sc)
             
             # get C-Y logits + prediction
             y_logits = torch.stack([self.c2y(concat[i]) for i in range(concat.size(0))], dim = 0) 
@@ -199,15 +198,22 @@ class XtoCtoY(nn.Module):
         else:
             y_logits = torch.stack([self.c2y(c_preds[i]) for i in range(c_preds.size(0))], dim = 0) 
             y_pred = self.sigmoid(y_logits)
-            y_pred_sc = None
 
-        # get prediction solely based on concept prediction for comparison
+        # get task prediction solely based on concept bottleneck predictions
         if self.sc:
             padding_tensor = torch.zeros(self.sc_out_dim)
             y_logits_cb = torch.stack([self.c2y(torch.cat([c_preds[i], padding_tensor], dim = -1)) for i in range(c_preds.size(0))], dim = 0)
         else:
             y_logits_cb = torch.stack([self.c2y(c_preds[i]) for i in range(c_preds.size(0))], dim = 0)
         y_pred_cb = self.sigmoid(y_logits_cb)
+
+        # get task prediction solely based on side channel predictions
+        if self.sc:
+            padding_tensor = torch.zeros(preds_sc.size(0), self.num_concepts)
+            y_logits_sc = self.c2y(torch.cat([padding_tensor, preds_sc], dim = -1))
+            y_pred_sc = self.sigmoid(y_logits_sc)
+        else:
+            y_pred_sc = None
 
         return [y_pred, c_logits_pre, c_preds, y_pred_sc, y_pred_cb]
 
