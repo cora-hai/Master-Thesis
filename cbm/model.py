@@ -434,9 +434,9 @@ def train_and_evaluate(args):
             # run GNN encoding + CBM
             embeddings = encoder(batch)
             XtoY_output, _, XtoC_output, SC_concept_preds, SC_task_output, CBM_task_output = ModelXtoCtoY(embeddings)
-            dot_cbm.extend(torch.tensordot(XtoC_output, weights_tensor_cbm, dims = 1))
+            dot_cbm.extend(torch.tensordot(XtoC_output, weights_tensor_cbm, dims = 1).cpu())
             if args.side_channel:
-                dot_sc.extend(torch.tensordot(SC_concept_preds, weights_tensor_sc, dims = 1))
+                dot_sc.extend(torch.tensordot(SC_concept_preds, weights_tensor_sc, dims = 1).cpu())
 
             # get concept and output predictions per batch
             y_true.extend(batch.y.cpu())
