@@ -1,4 +1,4 @@
-from model import MolNet, XtoCtoY, XtoC, FC, SideChannel, CtoY
+from model import MolNet, XtoCtoY, XtoC, FC, SideChannel, CtoY, SideChannelXtoC
 
 import torch.nn as nn
 import torch
@@ -96,9 +96,12 @@ class GNN(nn.Module):
 # wrapper model class to make our model compatible with SubgraphX explainer
 class SubgraphXWrapper(nn.Module):
 
-    def __init__(self, gnn_model):
+    def __init__(self, gnn_model, num_concepts, sc_out_dim):
         super(SubgraphXWrapper, self).__init__()
         self.gnn_model = gnn_model
+        self.sigmoid = nn.Sigmoid()
+        self.num_concepts = num_concepts
+        self.sc_out_dim = sc_out_dim
 
     def forward(
         self,
@@ -147,8 +150,13 @@ class SubgraphXWrapper(nn.Module):
         embeddings = global_add_pool(x_enc, batch)
 
         # 5. Direct Side Channel execution (bypasses FC concept layers)
-        y_logits_sc = self.gnn_model.cbm.sc(embeddings)
-        y_pred_sc = self.gnn_model.cbm.sigmoid(y_logits_sc)
+        c_logits_sc_pre = self.gnn_model.cbm.sc(embeddings)
+        c_logits_sc = torch.transpose(torch.stack(c_logits_sc_pre, dim = 0), 0, 1)
+        c_logits_sc = c_logits_sc.reshape(-1, self.sc_out_dim)
+        c_preds_sc = self.sigmoid(c_logits_sc)
+        padding_tensor = torch.zeros(c_preds_sc.size(0), self.num_concepts)
+        y_logits_sc = self.gnn_model.cbm.c2y(torch.cat([padding_tensor, c_preds_sc], dim = -1))
+        y_pred_sc = self.sigmoid(y_logits_sc)
 
         # 6. Format 2-class logits [log(1-p), log(p)] for DIG's internal softmax
         p_sc = torch.clamp(y_pred_sc.view(-1, 1), min=1e-7, max=1.0 - 1e-7)
@@ -319,7 +327,7 @@ def main(args):
     encoder_trained = torch.load(args.encoder_file, weights_only = False, map_location = torch.device("cpu"))
     XtoCtoY_trained = torch.load(args.cbm_file, weights_only = False, map_location = torch.device("cpu"))
     gnn_model = GNN(encoder_trained, XtoCtoY_trained)
-    explainer_model = SubgraphXWrapper(gnn_model)
+    explainer_model = SubgraphXWrapper(gnn_model, num_concepts = args.num_concepts, sc_out_dim = args.sc_out_dim)
 
     # define SubgraphX explainer
     subgraphx_explainer = SubgraphX(explainer_model,
@@ -359,13 +367,15 @@ def main(args):
 
     # write dataframe with most important substructure per molecule to csv file
     identifier = os.path.basename(args.data_file)
-    df.to_csv(f"{args.outfolder}/{identifier.replace('.csv', '_feat-attr.csv')}", index = False, header = True)
+    df.to_csv(f"{args.outfolder}/{identifier.replace('.csv', '_feat-attr_nitro_new.csv')}", index = False, header = True)
 
 
 if __name__ == "__main__":
     ap = argparse.ArgumentParser()
     ap.add_argument("--encoder-file", type = str, help = "path to trained GNN encoder")
     ap.add_argument("--cbm-file", type = str, help = "path to trained CBM with side channel")
+    ap.add_argument("--num-concepts", type = int, help = "number of concepts in bottleneck")
+    ap.add_argument("--sc-out-dim", type = int, help = "number of output nodes in side channel")
     ap.add_argument("--data-file", type = str, help = "path to csv file with data to explain")
     ap.add_argument("--outfolder", type = str, help = "path to directory to write output to")
     ap.add_argument("--max-nodes", type = int, nargs = "?", default = 5, help = "maximal number of nodes in output subgraph")
