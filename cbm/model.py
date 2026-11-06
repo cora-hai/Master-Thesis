@@ -219,6 +219,7 @@ class XtoCtoY(nn.Module):
             y_pred_sc = self.sigmoid(y_logits_sc)
         else:
             y_pred_sc = None
+            c_preds_sc = None
 
         return [y_pred, c_logits_pre, c_preds, c_preds_sc, y_pred_sc, y_pred_cb]
 
@@ -332,8 +333,11 @@ def train_and_evaluate(args):
             #joint_loss = XtoY_loss + XtoC_loss * args.lambda_1
 
             # joint loss with regularisation for SC output:
-            sc_reg = (SC_preds.sum(axis = 1) / SC_preds.size(1)).sum() / SC_preds.size(0)
-            joint_loss = XtoY_loss + XtoC_loss * args.lambda_1 + sc_reg * args.lambda_2
+            if args.side_channel:
+                sc_reg = (SC_preds.sum(axis = 1) / SC_preds.size(1)).sum() / SC_preds.size(0)
+                joint_loss = XtoY_loss + XtoC_loss * args.lambda_1 + sc_reg * args.lambda_2
+            else:
+                joint_loss = XtoY_loss + XtoC_loss * args.lambda_1
             joint_loss.backward()
             optimiser.step()
 
@@ -431,13 +435,15 @@ def train_and_evaluate(args):
             embeddings = encoder(batch)
             XtoY_output, _, XtoC_output, SC_concept_preds, SC_task_output, CBM_task_output = ModelXtoCtoY(embeddings)
             dot_cbm.extend(torch.tensordot(XtoC_output, weights_tensor_cbm, dims = 1))
-            dot_sc.extend(torch.tensordot(SC_concept_preds, weights_tensor_sc, dims = 1))
+            if args.side_channel:
+                dot_sc.extend(torch.tensordot(SC_concept_preds, weights_tensor_sc, dims = 1))
 
             # get concept and output predictions per batch
             y_true.extend(batch.y.cpu())
             y_pred.extend((XtoY_output.squeeze().cpu() > 0.5).float())
             y_pred_cbm.extend((CBM_task_output.squeeze().cpu() > 0.5).float())
-            y_pred_sc.extend((SC_task_output.squeeze().cpu() > 0.5).float())
+            if args.side_channel:
+                y_pred_sc.extend((SC_task_output.squeeze().cpu() > 0.5).float())
             c_true.append(batch.concepts.cpu().numpy().reshape(-1, num_concepts))
             c_pred_binary = (XtoC_output.cpu() > 0.5).float()
             c_pred.append(c_pred_binary)
@@ -447,13 +453,10 @@ def train_and_evaluate(args):
     c_pred_all = np.vstack(c_pred)
     test_y_acc = accuracy_score(y_true, y_pred)
     test_y_acc_cbm = accuracy_score(y_true, y_pred_cbm)
-    test_y_acc_sc = accuracy_score(y_true, y_pred_sc)
     test_y_auroc = roc_auc_score(y_true, y_pred)
     test_y_auroc_cbm = roc_auc_score(y_true, y_pred_cbm)
-    test_y_auroc_sc = roc_auc_score(y_true, y_pred_sc)
     test_y_jaccard = jaccard_score(y_true, y_pred, zero_division = 0.0)
     test_y_jaccard_cbm = jaccard_score(y_true, y_pred_cbm, zero_division = 0.0)
-    test_y_jaccard_sc = jaccard_score(y_true, y_pred_sc, zero_division = 0.0)
     test_c_acc = (c_pred_all == c_true_all).mean(axis = 0).tolist()
     test_c_acc_mean = np.mean(test_c_acc)
     test_c_jaccard = jaccard_score(c_true_all, c_pred_all, average = None, zero_division = 0.0)
@@ -461,7 +464,16 @@ def train_and_evaluate(args):
     test_c_f1 = f1_score(c_true_all, c_pred_all, average = None, zero_division = 0)
     test_c_f1_mean = np.mean(test_c_f1)
     cbm_importance = np.mean(dot_cbm) / len(concepts)
-    sc_importance = np.mean(dot_sc) / len(unknown_concepts)
+    if args.side_channel:
+        test_y_acc_sc = accuracy_score(y_true, y_pred_sc)
+        test_y_auroc_sc = roc_auc_score(y_true, y_pred_sc)
+        test_y_jaccard_sc = jaccard_score(y_true, y_pred_sc, zero_division = 0.0)
+        sc_importance = np.mean(dot_sc) / len(unknown_concepts)
+    else:
+        test_y_acc_sc = None
+        test_y_auroc_sc = None
+        test_y_jaccard_sc = None
+        sc_importance = None
   
     print(f"test y accuracy = {test_y_acc}", flush = True)
     print(f"test y accuracy CBM = {test_y_acc_cbm}", flush = True)
