@@ -9,19 +9,11 @@ from torch_geometric.utils.smiles import from_smiles
 from sklearn.metrics import roc_auc_score, accuracy_score, jaccard_score, f1_score
 from torchvision.ops import StochasticDepth # for side channel dropout
 
-# concept selection
-from sklearn.svm import LinearSVC
-from sklearn.ensemble import ExtraTreesClassifier
-from sklearn.feature_selection import SelectFromModel
-from greedy_set_cover import get_cover
-from fpmax import run_fpmax
-
 # utils
 import argparse
 import pandas as pd 
 import numpy as np 
 from utils import set_seed
-#import wandb
 
 
 DEVICE = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
@@ -132,6 +124,17 @@ class SideChannel(nn.Module):
     def forward(self, x):
         return self.stack(x)
 
+# side channel with architecture like XtoC (1 FC per hidden concept)
+class SideChannelXtoC(nn.Module):
+    def __init__(self, input_dim = 768, out_dim = 1) -> None:
+        super(SideChannelXtoC, self).__init__()
+        self.all_fc = nn.ModuleList()
+        for _ in range(out_dim):
+            self.all_fc.append(FC(input_dim))
+
+    def forward(self, x):
+        return [fc(x) for fc in self.all_fc]
+
 
 def gumbel_sigmoid(logits: Tensor, tau: float = 1, hard: bool = False, threshold: float = 0.5) -> Tensor:
     # gradient approximation for binary concept neurons, based on
@@ -181,15 +184,17 @@ class XtoCtoY(nn.Module):
 
         if self.sc:
             # get side channel output
-            logits_sc = self.sc(x)
+            c_logits_sc_pre = self.sc(x)
+            c_logits_sc = torch.transpose(torch.stack(c_logits_sc_pre, dim = 0), 0, 1)
+            c_logits_sc = c_logits_sc.reshape(-1, self.sc_out_dim)
             
-            # concatenate C-C and SC outputs to feed into C-Y layer
+            # concatenate X-C and SC outputs to feed into C-Y layer
             if self.sc_hard:    # binary side channel output
-                preds_sc = gumbel_sigmoid(logits_sc, hard = True)
-                concat = torch.cat((c_preds, preds_sc), dim = 1)
+                c_preds_sc = gumbel_sigmoid(c_logits_sc, hard = True)
+                concat = torch.cat((c_preds, c_preds_sc), dim = 1)
             else:   # logit side channel output
-                concat = torch.cat((c_preds, logits_sc), dim = 1)
-                preds_sc = self.sigmoid(logits_sc)
+                concat = torch.cat((c_preds, c_logits_sc), dim = 1)
+                c_preds_sc = self.sigmoid(c_logits_sc)
             
             # get C-Y logits + prediction
             y_logits = torch.stack([self.c2y(concat[i]) for i in range(concat.size(0))], dim = 0) 
@@ -209,20 +214,21 @@ class XtoCtoY(nn.Module):
 
         # get task prediction solely based on side channel predictions
         if self.sc:
-            padding_tensor = torch.zeros(preds_sc.size(0), self.num_concepts).to(DEVICE)
-            y_logits_sc = self.c2y(torch.cat([padding_tensor, preds_sc], dim = -1))
+            padding_tensor = torch.zeros(c_preds_sc.size(0), self.num_concepts).to(DEVICE)
+            y_logits_sc = self.c2y(torch.cat([padding_tensor, c_preds_sc], dim = -1))
             y_pred_sc = self.sigmoid(y_logits_sc)
         else:
             y_pred_sc = None
 
-        return [y_pred, c_logits_pre, c_preds, y_pred_sc, y_pred_cb]
+        return [y_pred, c_logits_pre, c_preds, c_preds_sc, y_pred_sc, y_pred_cb]
 
 # function for calling full model
 def full_cbm(num_concepts, in_dims = 768, side_channel = False, sc_hard = False, sc_out_dim = 0) -> XtoCtoY:
     x2c_layer = XtoC(num_concepts = num_concepts, in_dims = in_dims)
     c2y_layer = CtoY(input_dim = num_concepts + args.sc_out_dim)
     if side_channel:
-        sc = SideChannel(input_dim = in_dims, out_dim = args.sc_out_dim, p_drop = args.dropout_p)
+        #sc = SideChannel(input_dim = in_dims, out_dim = args.sc_out_dim, p_drop = args.dropout_p)
+        sc = SideChannelXtoC(input_dim = in_dims, out_dim = args.sc_out_dim)
         return XtoCtoY(x2c = x2c_layer, c2y = c2y_layer, side_channel = sc, sc_hard = sc_hard, num_concepts = num_concepts, sc_out_dim = sc_out_dim)
     else:
         return XtoCtoY(x2c = x2c_layer, c2y = c2y_layer, side_channel = None, num_concepts = num_concepts)
@@ -252,64 +258,13 @@ def train_and_evaluate(args):
     DATA["val"] = pd.read_csv(f"{args.data_dir}/val_{args.data_type}.csv")
     DATA["test"] = pd.read_csv(f"{args.data_dir}/test_{args.data_type}.csv")
 
+    # record concept names + number of concepts
+    X = DATA["train"].drop(columns = ['Drug', 'Y', 'Drug_ID'])
+    concepts = X.columns.to_list()
+    num_concepts = len(concepts)
 
-    ## select concepts ##
-    if args.selector == "l1":
-        # according to https://scikit-learn.org/stable/modules/feature_selection.html#l1-based-feature-selection
-        X, y = DATA["train"].drop(columns = ['Drug', 'Y', 'Drug_ID']), DATA["train"]["Y"]
-
-        # train linear support vector classifier with L1 penalty for "feature selection"
-        lsvc = LinearSVC(C=0.01, penalty = "l1", dual = False).fit(X,y)     # C = regularisation parameter, strength inversely proportional to C
-        selector = SelectFromModel(lsvc, prefit = True)
-    
-        # get selected features
-        feature_mask = selector.get_support()
-        features = X.columns[feature_mask].tolist()
-        num_concepts = len(features)
-
-        print(f"features = {features}")
-        print(f"# chosen concepts = {num_concepts} out of {len(X.columns)}")
-
-    elif args.selector == "tree":
-        # according to https://scikit-learn.org/stable/modules/feature_selection.html#tree-based-feature-selection
-        X, y = DATA["train"].drop(columns = ['Drug', 'Y', 'Drug_ID']), DATA["train"]["Y"]
-        print(f"X = {X.shape}")
-
-        # maybe max_features nutzen für feste Anzahl an concepts?
-        clf = ExtraTreesClassifier(n_estimators = 30, random_state = 42).fit(X,y)  # n_estimators = number of trees in the forest
-        selector = SelectFromModel(clf, prefit = True)
-        feature_mask = selector.get_support()
-        features = X.columns[feature_mask].tolist()
-        num_concepts = len(features)
-
-        print(f"features = {features}")
-        print(f"# chosen concepts = {num_concepts} out of {len(X.columns)}")
-
-    elif args.selector == "gsc":
-        X = DATA["train"].drop(columns = ['Drug', 'Y', 'Drug_ID'])
-        features = get_cover(X)
-        num_concepts = len(features)
-
-        print(f"features = {features}")
-        print(f"# chosen concepts = {num_concepts} out of {len(X.columns)}")
-
-    elif args.selector == "fpmax":
-        X = DATA["train"].drop(columns = ['Drug', 'Y', 'Drug_ID'])
-        features = run_fpmax(X, min_support = 0.5)
-        num_concepts = len(features)
-
-        print(f"features = {features}")
-        print(f"# chosen concepts = {num_concepts} out of {len(X.columns)}")
-
-    elif args.selector == "no":
-        X, y = DATA["train"].drop(columns = ['Drug', 'Y', 'Drug_ID']), DATA["train"]["Y"]
-        features = X.columns.to_list()
-        num_concepts = len(features)
-
-        print(f"# chosen concepts = {num_concepts} out of {len(X.columns)}")
-
-    else:
-        print(f"choose a valid concept selector method since {args.selector} is not")
+    print(f"# known concepts = {num_concepts}")
+    print(f"# unknown concepts = {args.sc_out_dim}")
 
 
     ## prepare data ##
@@ -320,9 +275,9 @@ def train_and_evaluate(args):
     DATA["test"]['Drug'] = DATA["test"]['Drug'].apply(from_smiles)  
 
     # attach the y and concepts to the PyG objects
-    DATA["train"]['Drug'] = DATA["train"].apply(attach_y_and_concepts, args = (features,), axis=1)
-    DATA["val"]['Drug'] = DATA["val"].apply(attach_y_and_concepts, args = (features,), axis=1)
-    DATA["test"]['Drug'] = DATA["test"].apply(attach_y_and_concepts, args = (features,), axis=1)
+    DATA["train"]['Drug'] = DATA["train"].apply(attach_y_and_concepts, args = (concepts,), axis=1)
+    DATA["val"]['Drug'] = DATA["val"].apply(attach_y_and_concepts, args = (concepts,), axis=1)
+    DATA["test"]['Drug'] = DATA["test"].apply(attach_y_and_concepts, args = (concepts,), axis=1)
 
     # create the data loaders
     train_loader = DataLoader(DATA["train"]['Drug'], batch_size=32, shuffle=True)
@@ -353,11 +308,6 @@ def train_and_evaluate(args):
     loss_c = torch.nn.BCEWithLogitsLoss(pos_weight = pos_weight_tensor).to(DEVICE)  # weighted concept loss
     loss_y = torch.nn.BCELoss().to(DEVICE)  # X-C-Y loss
 
-    ## configure W&B logging
-    # config = args.__dict__
-    # run = wandb.init(project = "CBM", config = config)
-    # run.watch(ModelXtoCtoY, loss_y, log = "all", log_freq = 10)
-
     ## train & validation loop ##
     best_acc_score = -1
     for i in range(args.num_epochs):
@@ -374,13 +324,17 @@ def train_and_evaluate(args):
 
             # run GNN encoding + CBM
             embeddings = encoder(batch)
-            XtoY_output, XtoC_logits, _, _, _ = ModelXtoCtoY(embeddings)
+            XtoY_output, XtoC_logits, _, SC_preds, _, _ = ModelXtoCtoY(embeddings)
 
             # loss calculation + backpropagation
             XtoC_logits = torch.stack(XtoC_logits, dim=1).squeeze()
             XtoC_loss = loss_c(XtoC_logits, batch.concepts.float().view(-1, num_concepts))
             XtoY_loss = loss_y(XtoY_output.squeeze(), batch.y.squeeze())
-            joint_loss = XtoY_loss + XtoC_loss * args.loss_weight
+            #joint_loss = XtoY_loss + XtoC_loss * args.loss_weight
+
+            # joint loss with regularisation for SC output:
+            sc_reg = (SC_preds.sum(axis = 1) / SC_preds.size(1)).sum() / SC_preds.size(0)
+            joint_loss = XtoY_loss + XtoC_loss * args.loss_weight + 0.1 * sc_reg
             joint_loss.backward()
             optimiser.step()
 
@@ -412,7 +366,7 @@ def train_and_evaluate(args):
 
                 # run GNN encoding + CBM
                 embeddings = encoder(batch)
-                XtoY_output, _, XtoC_output, _, _ = ModelXtoCtoY(embeddings)
+                XtoY_output, _, XtoC_output, _, _, _ = ModelXtoCtoY(embeddings)
 
                 # get concept and output predictions per batch
                 y_true.extend(batch.y.cpu())
@@ -421,9 +375,10 @@ def train_and_evaluate(args):
                 c_pred_binary = (XtoC_output.cpu() > 0.5).float()
                 c_pred.append(c_pred_binary)
 
-        # calculate concept and output accuracies (most of the only every 10th epoch)
+        # calculate output accuracy
         y_acc = accuracy_score(y_true, y_pred)
 
+        # calculate everything else only every 10th epoch
         if (i+1) % 10 == 0:
             c_true_all = np.vstack(c_true)
             c_pred_all = np.vstack(c_pred)
@@ -436,36 +391,34 @@ def train_and_evaluate(args):
             c_f1 = f1_score(c_true_all, c_pred_all, average = None, zero_division = 0)
             c_f1_mean = np.mean(c_f1)
 
+            print(f"epoch {i+1} | y accuracy = {y_acc} | y auroc = {y_auroc} | y jaccard = {y_jaccard}")
+            print(f"epoch {i+1} | mean concept acc = {c_acc_mean} | mean concept jaccard = {c_jaccard_mean} | mean concept f1 = {c_f1_mean}", flush = True)
+            
+            
         # record best validation accuracy & save best model config
         if y_acc > best_acc_score:
             best_acc_score = y_acc
-            #wandb.unwatch()
-            torch.save(encoder, f'{args.output_dir}/encoder_gnn_{args.data_type}_{args.selector}_{args.loss_weight}.pth')
-            torch.save(ModelXtoCtoY, f'{args.output_dir}/ModelXtoCtoY_gnn_{args.data_type}_{args.selector}_{args.loss_weight}.pth')
-            # best_encoder = encoder
-            # best_ModelXtoCtoY = ModelXtoCtoY
+            torch.save(encoder, f'{args.output_dir}/encoder_gnn_{args.data_type}_nitro_{args.loss_weight}.pth')
+            torch.save(ModelXtoCtoY, f'{args.output_dir}/ModelXtoCtoY_gnn_{args.data_type}_nitro_{args.loss_weight}.pth')
 
-        #run.log({"epoch": i+1, "Y val acc": y_acc, "Y val auroc": y_auroc, "Y val jaccard": y_jaccard, "C val mean acc": c_acc_mean, "C val jaccard": c_jaccard_mean, "C val F1": c_f1_mean})
-
-        if (i+1) % 10 == 0:
-            print(f"epoch {i+1} | y accuracy = {y_acc} | y auroc = {y_auroc} | y jaccard = {y_jaccard}")
-            print(f"epoch {i+1} | mean concept acc = {c_acc_mean} | mean concept jaccard = {c_jaccard_mean} | mean concept f1 = {c_f1_mean}", flush = True)
-        # print(f"concept accuracies = {c_acc}", flush = True)
-        # print(f"concept jaccards = {c_jaccard}", flush = True)
-
-    # save best models
-    # torch.save(best_encoder, f'{args.output_dir}/encoder_gnn_{args.data_type}_{args.selector}_{args.loss_weight}.pth')
-    # torch.save(best_ModelXtoCtoY, f'{args.output_dir}/ModelXtoCtoY_gnn_{args.data_type}_{args.selector}_{args.loss_weight}.pth')
-    # print(f"best model from epoch {best_epoch}")
+            
+    ## get weights per concept for SC vs. CBM importance ##
+    concept_weights = ModelXtoCtoY.c2y.linear.weight.detach().cpu().numpy()
+    unknown_concepts = [f"sc_{i+1}" for i in range(args.sc_out_dim)]
+    concept_weights_df = pd.DataFrame(concept_weights, columns = concepts + unknown_concepts)
+    weights_tensor_cbm = torch.tensor(concept_weights[0][:len(concepts)])
+    weights_tensor_sc = torch.tensor(concept_weights[0][len(concepts):])
+    weight_file = f"{args.output_dir}/ModelXtoCtoY_gnn_{args.data_type}_{args.selector}_concept_weights.csv"
+    concept_weights_df.to_csv(weight_file, index = False)
 
     ## test loop ##
-    encoder = torch.load(f'{args.output_dir}/encoder_gnn_{args.data_type}_{args.selector}_{args.loss_weight}.pth', weights_only = False)
-    ModelXtoCtoY = torch.load(f'{args.output_dir}/ModelXtoCtoY_gnn_{args.data_type}_{args.selector}_{args.loss_weight}.pth', weights_only = False)
-    # encoder = best_encoder
-    # ModelXtoCtoY = best_ModelXtoCtoY
+    encoder = torch.load(f'{args.output_dir}/encoder_gnn_{args.data_type}_nitro_{args.loss_weight}.pth', weights_only = False)
+    ModelXtoCtoY = torch.load(f'{args.output_dir}/ModelXtoCtoY_gnn_{args.data_type}_nitro_{args.loss_weight}.pth', weights_only = False)
     encoder.eval()
     ModelXtoCtoY.eval()
     c_pred = []
+    dot_cbm = []
+    dot_sc = []
     y_pred = []
     y_pred_cbm = []
     y_pred_sc = []
@@ -477,7 +430,9 @@ def train_and_evaluate(args):
 
             # run GNN encoding + CBM
             embeddings = encoder(batch)
-            XtoY_output, _, XtoC_output, SC_task_output, CBM_task_output = ModelXtoCtoY(embeddings)
+            XtoY_output, _, XtoC_output, SC_concept_preds, SC_task_output, CBM_task_output = ModelXtoCtoY(embeddings)
+            dot_cbm.extend(torch.tensordot(XtoC_output, weights_tensor_cbm, dims = 1))
+            dot_sc.extend(torch.tensordot(SC_concept_preds, weights_tensor_sc, dims = 1))
 
             # get concept and output predictions per batch
             y_true.extend(batch.y.cpu())
@@ -506,7 +461,9 @@ def train_and_evaluate(args):
     test_c_jaccard_mean = np.mean(test_c_jaccard)
     test_c_f1 = f1_score(c_true_all, c_pred_all, average = None, zero_division = 0)
     test_c_f1_mean = np.mean(test_c_f1)
-      
+    cbm_importance = np.mean(dot_cbm) / len(concepts)
+    sc_importance = np.mean(dot_sc) / len(unknown_concepts)
+  
     print(f"test y accuracy = {test_y_acc}", flush = True)
     print(f"test y accuracy CBM = {test_y_acc_cbm}", flush = True)
     print(f"test y accuracy SC = {test_y_acc_sc}", flush = True)
@@ -522,12 +479,8 @@ def train_and_evaluate(args):
     print(f"test concept accuracies = {test_c_acc}", flush = True)
     print(f"test concept jaccards = {list(test_c_jaccard)}", flush = True)
     print(f"test concept F1 = {list(test_c_f1)}", flush = True)
-
-    # get weights per concept
-    concept_weights = ModelXtoCtoY.c2y.linear.weight.detach().cpu().numpy()
-    concept_weights_df = pd.DataFrame(concept_weights, columns = features + [f"sc_{i+1}" for i in range(args.sc_out_dim)])
-    weight_file = f"{args.output_dir}/ModelXtoCtoY_gnn_{args.data_type}_{args.selector}_concept_weights.csv"
-    concept_weights_df.to_csv(weight_file, index = False)
+    print(f"CBM importance = {cbm_importance}", flush = True)
+    print(f"SC importance = {sc_importance}", flush = True)
 
     return {"Y test acc": test_y_acc, "Y test auroc": test_y_auroc, "C test acc": test_c_acc_mean}
 
@@ -547,8 +500,6 @@ if __name__ == "__main__":
     ap.add_argument("--num-epochs", type = int, nargs = "?", default = 200, help = "number of epochs to train for")
     ap.add_argument("--seed", type = int, nargs = "?", default = 27, help = "random seed for reproducibility")
     args = ap.parse_args()
-
-    #wandb.login()
 
     set_seed(args.seed)
 
