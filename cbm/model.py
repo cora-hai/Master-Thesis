@@ -250,7 +250,6 @@ def attach_y_and_concepts(row, features):
 
 def train_and_evaluate(args):
 
-    #print(args.loss_weight)
 
     ## load data ##
     DATA = {}
@@ -330,11 +329,11 @@ def train_and_evaluate(args):
             XtoC_logits = torch.stack(XtoC_logits, dim=1).squeeze()
             XtoC_loss = loss_c(XtoC_logits, batch.concepts.float().view(-1, num_concepts))
             XtoY_loss = loss_y(XtoY_output.squeeze(), batch.y.squeeze())
-            #joint_loss = XtoY_loss + XtoC_loss * args.loss_weight
+            #joint_loss = XtoY_loss + XtoC_loss * args.lambda_1
 
             # joint loss with regularisation for SC output:
             sc_reg = (SC_preds.sum(axis = 1) / SC_preds.size(1)).sum() / SC_preds.size(0)
-            joint_loss = XtoY_loss + XtoC_loss * args.loss_weight + 0.1 * sc_reg
+            joint_loss = XtoY_loss + XtoC_loss * args.lambda_1 + sc_reg * args.lambda_2
             joint_loss.backward()
             optimiser.step()
 
