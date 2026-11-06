@@ -398,8 +398,8 @@ def train_and_evaluate(args):
         # record best validation accuracy & save best model config
         if y_acc > best_acc_score:
             best_acc_score = y_acc
-            torch.save(encoder, f'{args.output_dir}/encoder_gnn_{args.data_type}_nitro_{args.loss_weight}.pth')
-            torch.save(ModelXtoCtoY, f'{args.output_dir}/ModelXtoCtoY_gnn_{args.data_type}_nitro_{args.loss_weight}.pth')
+            torch.save(encoder, f'{args.output_dir}/encoder_{args.model_name}.pth')
+            torch.save(ModelXtoCtoY, f'{args.output_dir}/ModelXtoCtoY_{args.model_name}.pth')
 
             
     ## get weights per concept for SC vs. CBM importance ##
@@ -408,12 +408,12 @@ def train_and_evaluate(args):
     concept_weights_df = pd.DataFrame(concept_weights, columns = concepts + unknown_concepts)
     weights_tensor_cbm = torch.tensor(concept_weights[0][:len(concepts)])
     weights_tensor_sc = torch.tensor(concept_weights[0][len(concepts):])
-    weight_file = f"{args.output_dir}/ModelXtoCtoY_gnn_{args.data_type}_{args.selector}_concept_weights.csv"
+    weight_file = f"{args.output_dir}/concept_weights_{args.model_name}.csv"
     concept_weights_df.to_csv(weight_file, index = False)
 
     ## test loop ##
-    encoder = torch.load(f'{args.output_dir}/encoder_gnn_{args.data_type}_nitro_{args.loss_weight}.pth', weights_only = False)
-    ModelXtoCtoY = torch.load(f'{args.output_dir}/ModelXtoCtoY_gnn_{args.data_type}_nitro_{args.loss_weight}.pth', weights_only = False)
+    encoder = torch.load(f'{args.output_dir}/encoder_{args.model_name}.pth', weights_only = False)
+    ModelXtoCtoY = torch.load(f'{args.output_dir}/ModelXtoCtoY_{args.model_name}.pth', weights_only = False)
     encoder.eval()
     ModelXtoCtoY.eval()
     c_pred = []
@@ -490,14 +490,15 @@ if __name__ == "__main__":
     ap.add_argument("--data-dir", type = str, help = "path to input data directory")
     ap.add_argument("--data-type", type = str, help = "name of dataset")
     ap.add_argument("--output-dir", type = str, help = "path to directory where outputs and logs will be saved")
-    ap.add_argument("--selector", type = str, nargs = "?", default = "no", help = "concept selection method")
-    ap.add_argument("--loss-weight", type = float, nargs = "?", default = 2.0, help = "weight for joint loss function")
+    ap.add_argument("--model-name", type = str, help = "what to include in the name of the model file")
+    ap.add_argument("--lambda_1", type = float, nargs = "?", default = 2.0, help = "weight for concept loss")
+    ap.add_argument("--lambda_2", type = float, nargs = "?", default = 0.1, help = "weight for side channel regularisation term")
     ap.add_argument("--learning-rate", type = float, nargs = "?", default = 2e-4, help = "learning rate for model optimisation")
     ap.add_argument("--side-channel", action = "store_true", help = "activate side channel usage")
     ap.add_argument("--hard-sc", action = "store_true", help = "switch to binary side channel output instead of logits")
     ap.add_argument("--sc-out-dim", type = int, nargs = "?", default = 0, help = "number of nodes in side channel output")
-    ap.add_argument("--dropout-p", type = float, nargs = "?", default = 0.0, help = "dropout probability for side channel regularisation")
-    ap.add_argument("--num-epochs", type = int, nargs = "?", default = 200, help = "number of epochs to train for")
+    #ap.add_argument("--dropout-p", type = float, nargs = "?", default = 0.0, help = "dropout probability for side channel regularisation")
+    ap.add_argument("--num-epochs", type = int, nargs = "?", default = 500, help = "number of epochs to train for")
     ap.add_argument("--seed", type = int, nargs = "?", default = 27, help = "random seed for reproducibility")
     args = ap.parse_args()
 
