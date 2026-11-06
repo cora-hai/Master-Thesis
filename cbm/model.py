@@ -409,8 +409,8 @@ def train_and_evaluate(args):
     concept_weights = ModelXtoCtoY.c2y.linear.weight.detach().cpu().numpy()
     unknown_concepts = [f"sc_{i+1}" for i in range(args.sc_out_dim)]
     concept_weights_df = pd.DataFrame(concept_weights, columns = concepts + unknown_concepts)
-    weights_tensor_cbm = torch.tensor(concept_weights[0][:len(concepts)])
-    weights_tensor_sc = torch.tensor(concept_weights[0][len(concepts):])
+    weights_tensor_cbm = torch.tensor(concept_weights[0][:len(concepts)]).to(DEVICE)
+    weights_tensor_sc = torch.tensor(concept_weights[0][len(concepts):]).to(DEVICE)
     weight_file = f"{args.output_dir}/concept_weights_{args.model_name}.csv"
     concept_weights_df.to_csv(weight_file, index = False)
 
