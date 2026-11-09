@@ -305,7 +305,7 @@ def train_and_evaluate(args):
     encoder = MolNet(in_channels=DATA["train"]['Drug'][1].x.shape[1], hidden_channels=768).to(DEVICE)
     optimiser = torch.optim.Adam(list(encoder.parameters()) + list(ModelXtoCtoY.parameters()), lr = args.learning_rate)
     #loss_c = torch.nn.BCEWithLogitsLoss(pos_weight = pos_weight_tensor).to(DEVICE)  # weighted concept loss
-    #loss_c = torch.nn.BCEWithLogitsLoss().to(DEVICE)
+    loss_c = torch.nn.BCEWithLogitsLoss().to(DEVICE)
     loss_y = torch.nn.BCELoss().to(DEVICE)  # X-C-Y loss
 
     ## train & validation loop ##
@@ -328,8 +328,10 @@ def train_and_evaluate(args):
 
             # loss calculation + backpropagation
             XtoC_logits = torch.stack(XtoC_logits, dim=1).squeeze()
-            #XtoC_loss = loss_c(XtoC_logits, batch.concepts.float().view(-1, num_concepts))
-            XtoC_loss = concept_loss(XtoC_logits, batch.concepts.float().view(-1, num_concepts), concept_counts = concept_counts)
+            if args.special_loss:
+                XtoC_loss = concept_loss(XtoC_logits, batch.concepts.float().view(-1, num_concepts), concept_counts = concept_counts)
+            else:
+                XtoC_loss = loss_c(XtoC_logits, batch.concepts.float().view(-1, num_concepts))
             XtoY_loss = loss_y(XtoY_output.squeeze(), batch.y.squeeze())
             #joint_loss = XtoY_loss + XtoC_loss * args.lambda_1
 
@@ -504,6 +506,7 @@ if __name__ == "__main__":
     ap.add_argument("--output-dir", type = str, help = "path to directory where outputs and logs will be saved")
     ap.add_argument("--model-name", type = str, help = "what to include in the name of the model file")
     ap.add_argument("--weighted-loss", action = "store_true", help = "switch to different loss weights per concept")
+    ap.add_argument("--special-loss", action = "store_true", help = "switch to special concept loss (weighted)")
     ap.add_argument("--lambda-1", type = float, nargs = "?", default = 2.0, help = "weight for concept loss")
     ap.add_argument("--lambda-2", type = float, nargs = "?", default = 0.1, help = "weight for side channel regularisation term")
     ap.add_argument("--learning-rate", type = float, nargs = "?", default = 2e-4, help = "learning rate for model optimisation")

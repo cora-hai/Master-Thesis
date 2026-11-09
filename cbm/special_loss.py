@@ -7,7 +7,8 @@ def concept_loss(inputs: torch.Tensor, targets: torch.Tensor, concept_counts: to
 
     # calculate weights from concept counts
     eps = 1e-8
-    weights = (1.0 / concept_counts + eps) / len(concept_counts)
+    inverse = (1.0 / concept_counts + eps)
+    weights = inverse / inverse.sum()
 
     # get "normal" cross-entropy loss
     bce_loss = F.binary_cross_entropy_with_logits(inputs, targets, reduction = "none")
