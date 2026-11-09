@@ -9,6 +9,8 @@ from torch_geometric.utils.smiles import from_smiles
 from sklearn.metrics import roc_auc_score, accuracy_score, jaccard_score, f1_score
 from torchvision.ops import StochasticDepth # for side channel dropout
 
+from special_loss import concept_loss
+
 # utils
 import argparse
 import pandas as pd 
@@ -150,13 +152,13 @@ def gumbel_sigmoid(logits: Tensor, tau: float = 1, hard: bool = False, threshold
     y_soft = gumbels.sigmoid()
 
     if hard:
-        # Straight through.
+        # straight through
         indices = (y_soft > threshold).nonzero(as_tuple=True)
         y_hard = torch.zeros_like(logits, memory_format=torch.legacy_contiguous_format)
         y_hard[indices[0], indices[1]] = 1.0
         ret = y_hard - y_soft.detach() + y_soft
     else:
-        # Reparametrization trick.
+        # reparametrization trick
         ret = y_soft
     return ret
         
@@ -251,7 +253,6 @@ def attach_y_and_concepts(row, features):
 
 def train_and_evaluate(args):
 
-
     ## load data ##
     DATA = {}
     DATA["train"] = pd.read_csv(f"{args.data_dir}/train_{args.data_type}.csv")
@@ -261,14 +262,12 @@ def train_and_evaluate(args):
     # record concept names + number of concepts
     X = DATA["train"].drop(columns = ['Drug', 'Y', 'Drug_ID'])
     concepts = X.columns.to_list()
+    concept_counts = torch.tensor(X.sum(axis = 0)).to(DEVICE)
     num_concepts = len(concepts)
-
     print(f"# known concepts = {num_concepts}")
     print(f"# unknown concepts = {args.sc_out_dim}")
 
-
     ## prepare data ##
-
     # turn the SMILES strings into PyG objects
     DATA["train"]['Drug'] = DATA["train"]['Drug'].apply(from_smiles)
     DATA["val"]['Drug'] = DATA["val"]['Drug'].apply(from_smiles)
@@ -285,27 +284,28 @@ def train_and_evaluate(args):
     test_loader = DataLoader(DATA["test"]['Drug'], batch_size=32, shuffle=False)
 
 
-    ## dynamic per-concept class imbalance weighting ##
+    if args.weighted_loss:
+        ## dynamic per-concept class imbalance weighting ##
+        # compute per-concept positive weights from training data
+        train_concepts = np.vstack([row[concepts].values.astype(float) for _, row in DATA["train"].iterrows()])
+        pos_counts = train_concepts.sum(axis=0)
+        neg_counts = len(train_concepts) - pos_counts
 
-    # # compute per-concept positive weights from training data
-    # train_concepts = np.vstack([row[features].values.astype(float) for _, row in DATA["train"].iterrows()])
-    # pos_counts = train_concepts.sum(axis=0)
-    # neg_counts = len(train_concepts) - pos_counts
-
-    # # calculate ratio (neg / pos) per concept with epsilon to prevent div-by-zero
-    # pos_weight_values = np.where(pos_counts > 0, neg_counts / (pos_counts + 1e-5), 1.0)
-    # pos_weight_tensor = torch.tensor(pos_weight_values, dtype=torch.float32).to(DEVICE)
-    # print(f"{pos_weight_values = }")
-
-    # alternative to different weights per class:
-    pos_weight_tensor = torch.tensor([5.0]).to(DEVICE)
+        # calculate ratio (neg / pos) per concept with epsilon to prevent div-by-zero
+        pos_weight_values = np.where(pos_counts > 0, neg_counts / (pos_counts + 1e-5), 1.0)
+        pos_weight_tensor = torch.tensor(pos_weight_values, dtype=torch.float32).to(DEVICE)
+        #print(f"{pos_weight_values = }")
+    else:
+        # take same weight per class
+        pos_weight_tensor = torch.tensor([5.0]).to(DEVICE)
 
 
     ## initialise everything ##
     ModelXtoCtoY = full_cbm(num_concepts, side_channel = args.side_channel, sc_hard = args.hard_sc, sc_out_dim = args.sc_out_dim).to(DEVICE)
     encoder = MolNet(in_channels=DATA["train"]['Drug'][1].x.shape[1], hidden_channels=768).to(DEVICE)
     optimiser = torch.optim.Adam(list(encoder.parameters()) + list(ModelXtoCtoY.parameters()), lr = args.learning_rate)
-    loss_c = torch.nn.BCEWithLogitsLoss(pos_weight = pos_weight_tensor).to(DEVICE)  # weighted concept loss
+    #loss_c = torch.nn.BCEWithLogitsLoss(pos_weight = pos_weight_tensor).to(DEVICE)  # weighted concept loss
+    #loss_c = torch.nn.BCEWithLogitsLoss().to(DEVICE)
     loss_y = torch.nn.BCELoss().to(DEVICE)  # X-C-Y loss
 
     ## train & validation loop ##
@@ -328,7 +328,8 @@ def train_and_evaluate(args):
 
             # loss calculation + backpropagation
             XtoC_logits = torch.stack(XtoC_logits, dim=1).squeeze()
-            XtoC_loss = loss_c(XtoC_logits, batch.concepts.float().view(-1, num_concepts))
+            #XtoC_loss = loss_c(XtoC_logits, batch.concepts.float().view(-1, num_concepts))
+            XtoC_loss = concept_loss(XtoC_logits, batch.concepts.float().view(-1, num_concepts), concept_counts = concept_counts)
             XtoY_loss = loss_y(XtoY_output.squeeze(), batch.y.squeeze())
             #joint_loss = XtoY_loss + XtoC_loss * args.lambda_1
 
@@ -502,6 +503,7 @@ if __name__ == "__main__":
     ap.add_argument("--data-type", type = str, help = "name of dataset")
     ap.add_argument("--output-dir", type = str, help = "path to directory where outputs and logs will be saved")
     ap.add_argument("--model-name", type = str, help = "what to include in the name of the model file")
+    ap.add_argument("--weighted-loss", action = "store_true", help = "switch to different loss weights per concept")
     ap.add_argument("--lambda-1", type = float, nargs = "?", default = 2.0, help = "weight for concept loss")
     ap.add_argument("--lambda-2", type = float, nargs = "?", default = 0.1, help = "weight for side channel regularisation term")
     ap.add_argument("--learning-rate", type = float, nargs = "?", default = 2e-4, help = "learning rate for model optimisation")
