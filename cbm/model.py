@@ -264,6 +264,7 @@ def train_and_evaluate(args):
     concepts = X.columns.to_list()
     concept_counts = torch.tensor(X.sum(axis = 0)).to(DEVICE)
     num_concepts = len(concepts)
+    concept_rel_freq = concept_counts / num_concepts
     print(f"# known concepts = {num_concepts}")
     print(f"# unknown concepts = {args.sc_out_dim}")
 
@@ -304,8 +305,8 @@ def train_and_evaluate(args):
     ModelXtoCtoY = full_cbm(num_concepts, side_channel = args.side_channel, sc_hard = args.hard_sc, sc_out_dim = args.sc_out_dim).to(DEVICE)
     encoder = MolNet(in_channels=DATA["train"]['Drug'][1].x.shape[1], hidden_channels=768).to(DEVICE)
     optimiser = torch.optim.Adam(list(encoder.parameters()) + list(ModelXtoCtoY.parameters()), lr = args.learning_rate)
-    #loss_c = torch.nn.BCEWithLogitsLoss(pos_weight = pos_weight_tensor).to(DEVICE)  # weighted concept loss
-    loss_c = torch.nn.BCEWithLogitsLoss().to(DEVICE)
+    loss_c = torch.nn.BCEWithLogitsLoss(pos_weight = pos_weight_tensor).to(DEVICE)  # weighted concept loss
+    #loss_c = torch.nn.BCEWithLogitsLoss().to(DEVICE)
     loss_y = torch.nn.BCELoss().to(DEVICE)  # X-C-Y loss
 
     ## train & validation loop ##
@@ -391,11 +392,11 @@ def train_and_evaluate(args):
             y_auroc = roc_auc_score(y_true, y_pred)
             y_jaccard = jaccard_score(y_true, y_pred, zero_division = 0.0)
             c_acc = (c_pred_all == c_true_all).mean(axis = 0).tolist()
-            c_acc_mean = np.mean(c_acc)
+            c_acc_mean = np.average(c_acc, weights = concept_rel_freq)
             c_jaccard = jaccard_score(c_true_all, c_pred_all, average = None, zero_division = 0.0)
-            c_jaccard_mean = np.mean(c_jaccard)
+            c_jaccard_mean = np.average(c_jaccard, weights = concept_rel_freq)
             c_f1 = f1_score(c_true_all, c_pred_all, average = None, zero_division = 0)
-            c_f1_mean = np.mean(c_f1)
+            c_f1_mean = np.average(c_f1, weights = concept_rel_freq)
 
             print(f"epoch {i+1} | y accuracy = {y_acc} | y auroc = {y_auroc} | y jaccard = {y_jaccard}")
             print(f"epoch {i+1} | mean concept acc = {c_acc_mean} | mean concept jaccard = {c_jaccard_mean} | mean concept f1 = {c_f1_mean}", flush = True)
@@ -461,22 +462,26 @@ def train_and_evaluate(args):
     test_y_jaccard = jaccard_score(y_true, y_pred, zero_division = 0.0)
     test_y_jaccard_cbm = jaccard_score(y_true, y_pred_cbm, zero_division = 0.0)
     test_c_acc = (c_pred_all == c_true_all).mean(axis = 0).tolist()
-    test_c_acc_mean = np.mean(test_c_acc)
+    test_c_acc_mean = np.average(test_c_acc, weights = concept_rel_freq)
     test_c_jaccard = jaccard_score(c_true_all, c_pred_all, average = None, zero_division = 0.0)
-    test_c_jaccard_mean = np.mean(test_c_jaccard)
+    test_c_jaccard_mean = np.average(test_c_jaccard, weights = concept_rel_freq)
     test_c_f1 = f1_score(c_true_all, c_pred_all, average = None, zero_division = 0)
-    test_c_f1_mean = np.mean(test_c_f1)
-    cbm_importance = np.mean(dot_cbm) / len(concepts)
+    test_c_f1_mean = np.average(test_c_f1, weights = concept_rel_freq)
     if args.side_channel:
         test_y_acc_sc = accuracy_score(y_true, y_pred_sc)
         test_y_auroc_sc = roc_auc_score(y_true, y_pred_sc)
         test_y_jaccard_sc = jaccard_score(y_true, y_pred_sc, zero_division = 0.0)
-        sc_importance = np.mean(dot_sc) / len(unknown_concepts)
+        cbm_importance_raw = np.mean(np.abs(dot_cbm))
+        sc_importance_raw = np.mean(np.abs(dot_sc))
+        importance_normaliser = cbm_importance_raw + sc_importance_raw
+        cbm_importance = cbm_importance_raw / importance_normaliser
+        sc_importance = sc_importance_raw / importance_normaliser
     else:
         test_y_acc_sc = None
         test_y_auroc_sc = None
         test_y_jaccard_sc = None
         sc_importance = None
+        cbm_importance = None
   
     print(f"test y accuracy = {test_y_acc}", flush = True)
     print(f"test y accuracy CBM = {test_y_acc_cbm}", flush = True)
