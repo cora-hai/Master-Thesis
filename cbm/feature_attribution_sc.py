@@ -342,32 +342,67 @@ def main(args):
     df = pd.read_csv(args.data_file, header = 0)
     dataset = dataframe_to_pyg_dataset(df, smiles_col = "Drug", label_col = "Y")
 
-    # get top substructure for each molecule in the dataset
-    print("getting explanations...")
-    top_substructures = []
-    for i in range(len(dataset)):
-        sample = dataset[i]
-        #print(f"{sample = }")
-        _, explanation_results, _ = subgraphx_explainer(x = sample.x, 
-                                                        edge_index = sample.edge_index, 
-                                                        edge_attr = sample.edge_attr, 
-                                                        max_nodes = args.max_nodes)
+    if args.max_nodes_range:
 
-        smiles_str = df["Drug"][i]
-        #print(f"{smiles_str = }")
-        fragment_smiles = get_top_subgraph_smiles(smiles = smiles_str, 
-                                                  explanation_results = explanation_results, 
-                                                  top_k_atoms = args.max_nodes)
+        for m in range(1, args.max_nodes_range + 1):
 
-        #print(f"{fragment_smiles}")
-        top_substructures.append(fragment_smiles)
+            print(f"max_nodes = {m}")
 
-    df["Top Substructure"] = top_substructures
-    print(df["Top Substructure"].value_counts())
+            # get top substructure for each molecule in the dataset
+            print("getting explanations...")
+            top_substructures = []
+            for i in range(len(dataset)):
+                sample = dataset[i]
+                #print(f"{sample = }")
+                _, explanation_results, _ = subgraphx_explainer(x = sample.x, 
+                                                                edge_index = sample.edge_index, 
+                                                                edge_attr = sample.edge_attr, 
+                                                                max_nodes = m)
 
-    # write dataframe with most important substructure per molecule to csv file
-    identifier = os.path.basename(args.data_file)
-    df.to_csv(f"{args.outfolder}/{identifier.replace('.csv', '_feat-attr_nitro_new.csv')}", index = False, header = True)
+                smiles_str = df["Drug"][i]
+                #print(f"{smiles_str = }")
+                fragment_smiles = get_top_subgraph_smiles(smiles = smiles_str, 
+                                                        explanation_results = explanation_results, 
+                                                        top_k_atoms = m)
+
+                #print(f"{fragment_smiles}")
+                top_substructures.append(fragment_smiles)
+
+            df["Top Substructure"] = top_substructures
+            print(df["Top Substructure"].value_counts())
+
+            # write dataframe with most important substructure per molecule to csv file
+            identifier = os.path.basename(args.data_file)
+            df.to_csv(f"{args.outfolder}/{identifier.replace('.csv', f'_feat-attr_nitro_100_max_nodes_{m}.csv')}", index = False, header = True)
+
+    else:
+        # get top substructure for each molecule in the dataset
+        print("getting explanations...")
+        top_substructures = []
+        for i in range(len(dataset)):
+            sample = dataset[i]
+            #print(f"{sample = }")
+            _, explanation_results, _ = subgraphx_explainer(x = sample.x, 
+                                                            edge_index = sample.edge_index, 
+                                                            edge_attr = sample.edge_attr, 
+                                                            max_nodes = args.max_nodes)
+
+            smiles_str = df["Drug"][i]
+            #print(f"{smiles_str = }")
+            fragment_smiles = get_top_subgraph_smiles(smiles = smiles_str, 
+                                                    explanation_results = explanation_results, 
+                                                    top_k_atoms = args.max_nodes)
+
+            #print(f"{fragment_smiles}")
+            top_substructures.append(fragment_smiles)
+
+        df["Top Substructure"] = top_substructures
+        print(df["Top Substructure"].value_counts())
+
+        # write dataframe with most important substructure per molecule to csv file
+        identifier = os.path.basename(args.data_file)
+        df.to_csv(f"{args.outfolder}/{identifier.replace('.csv', f'_feat-attr_nitro_100_max_nodes.csv')}", index = False, header = True)
+
 
 
 if __name__ == "__main__":
@@ -379,6 +414,7 @@ if __name__ == "__main__":
     ap.add_argument("--data-file", type = str, help = "path to csv file with data to explain")
     ap.add_argument("--outfolder", type = str, help = "path to directory to write output to")
     ap.add_argument("--max-nodes", type = int, nargs = "?", default = 5, help = "maximal number of nodes in output subgraph")
+    ap.add_argument("--max-nodes-range", type = int, nargs = "?", default = None, help = "run explanation for range of max-nodes")
     args = ap.parse_args()
 
     main(args)
