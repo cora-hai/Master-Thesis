@@ -334,14 +334,17 @@ def train_and_evaluate(args):
             else:
                 XtoC_loss = loss_c(XtoC_logits, batch.concepts.float().view(-1, num_concepts))
             XtoY_loss = loss_y(XtoY_output.squeeze(), batch.y.squeeze())
-            #joint_loss = XtoY_loss + XtoC_loss * args.lambda_1
+            joint_loss = XtoY_loss + XtoC_loss * args.lambda_1
 
             # joint loss with regularisation for SC output:
             if args.side_channel:
                 sc_reg = (SC_preds.sum(axis = 1) / SC_preds.size(1)).sum() / SC_preds.size(0)
-                joint_loss = XtoY_loss + XtoC_loss * args.lambda_1 + sc_reg * args.lambda_2
-            else:
-                joint_loss = XtoY_loss + XtoC_loss * args.lambda_1
+                joint_loss += sc_reg * args.lambda_2
+
+            # regularisation for CtoY layer to ensure concept sparsity
+            if args.ctoy_reg:
+                l1_norm = sum(p.abs() for p in ModelXtoCtoY.c2y.linear.weight)
+                joint_loss += l1_norm * args.lambda_3
             joint_loss.backward()
             optimiser.step()
 
@@ -512,8 +515,10 @@ if __name__ == "__main__":
     ap.add_argument("--model-name", type = str, help = "what to include in the name of the model file")
     ap.add_argument("--weighted-loss", action = "store_true", help = "switch to different loss weights per concept")
     ap.add_argument("--special-loss", action = "store_true", help = "switch to special concept loss (weighted)")
+    ap.add_argument("--ctoy-reg", action = "store_true", help = "swith on L1 regularisation in CtoY layer")
     ap.add_argument("--lambda-1", type = float, nargs = "?", default = 2.0, help = "weight for concept loss")
     ap.add_argument("--lambda-2", type = float, nargs = "?", default = 0.1, help = "weight for side channel regularisation term")
+    ap.add_argument("--lambda-3", type = float, nargs = "?", default = 0.1, help = "weight for L1 regularisation of CtoY layer")
     ap.add_argument("--learning-rate", type = float, nargs = "?", default = 2e-4, help = "learning rate for model optimisation")
     ap.add_argument("--side-channel", action = "store_true", help = "activate side channel usage")
     ap.add_argument("--hard-sc", action = "store_true", help = "switch to binary side channel output instead of logits")
