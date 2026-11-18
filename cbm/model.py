@@ -343,7 +343,7 @@ def train_and_evaluate(args):
 
             # regularisation for CtoY layer to ensure concept sparsity
             if args.ctoy_reg:
-                l1_norm = sum(p.abs() for p in ModelXtoCtoY.c2y.linear.weight)
+                l1_norm = sum(sum(p.abs() for p in ModelXtoCtoY.c2y.linear.weight)) / (num_concepts + args.sc_out_dim)
                 joint_loss += l1_norm * args.lambda_3
             joint_loss.backward()
             optimiser.step()
