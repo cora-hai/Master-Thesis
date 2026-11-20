@@ -344,8 +344,16 @@ def train_and_evaluate(args):
 
             # regularisation for CtoY layer to ensure concept sparsity
             if args.ctoy_reg:
-                l1_norm = sum(sum(p.abs() for p in ModelXtoCtoY.c2y.linear.weight)) / (num_concepts + args.sc_out_dim)
-                joint_loss += l1_norm * args.lambda_3
+                # regularise C-Y weights related to CBM and SC outputs with different strength
+                concept_weights = ModelXtoCtoY.c2y.linear.weight.detach().cpu().numpy()
+                weights_tensor_cbm = torch.tensor(concept_weights[0][:len(concepts)]).to(DEVICE)
+                weights_tensor_sc = torch.tensor(concept_weights[0][len(concepts):]).to(DEVICE)
+                l1_norm_cbm = sum(torch.abs(weights_tensor_cbm)) / num_concepts
+                l1_norm_sc = sum(torch.abs(weights_tensor_sc)) / args.sc_out_dim
+                joint_loss += l1_norm_cbm * args.alpha + l1_norm_sc * args.beta
+                # l1_norm = sum(sum(p.abs() for p in ModelXtoCtoY.c2y.linear.weight)) / (num_concepts + args.sc_out_dim)
+                # joint_loss += l1_norm * args.lambda_3
+                
             joint_loss.backward()
             optimiser.step()
 
@@ -516,10 +524,11 @@ if __name__ == "__main__":
     ap.add_argument("--model-name", type = str, help = "what to include in the name of the model file")
     ap.add_argument("--weighted-loss", action = "store_true", help = "switch to different loss weights per concept")
     ap.add_argument("--special-loss", action = "store_true", help = "switch to special concept loss (weighted)")
-    ap.add_argument("--ctoy-reg", action = "store_true", help = "swith on L1 regularisation in CtoY layer")
     ap.add_argument("--lambda-1", type = float, nargs = "?", default = 2.0, help = "weight for concept loss")
     ap.add_argument("--lambda-2", type = float, nargs = "?", default = 0.1, help = "weight for side channel regularisation term")
-    ap.add_argument("--lambda-3", type = float, nargs = "?", default = 0.1, help = "weight for L1 regularisation of CtoY layer")
+    ap.add_argument("--ctoy-reg", action = "store_true", help = "swith on L1 regularisation in CtoY layer")
+    ap.add_argument("--alpha", type = float, nargs = "?", default = 0.0, help = "weight for C-Y regularisation of weights related to CBM")
+    ap.add_argument("--beta", type = float, nargs = "?", default = 0.0, help = "weight for C-Y regularisation of weights related to SC")
     ap.add_argument("--learning-rate", type = float, nargs = "?", default = 2e-4, help = "learning rate for model optimisation")
     ap.add_argument("--side-channel", action = "store_true", help = "activate side channel usage")
     ap.add_argument("--hard-sc", action = "store_true", help = "switch to binary side channel output instead of logits")
