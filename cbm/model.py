@@ -268,8 +268,8 @@ def train_and_evaluate(args):
     concept_rel_log_freq = np.log(concept_counts.cpu()) / np.log(num_concepts)
 
     #concept_rel_log_freq = np.log(concept_rel_freq.cpu())
-    print(f"# known concepts = {num_concepts}")
-    print(f"# unknown concepts = {args.sc_out_dim}")
+    print(f"# known concepts = {num_concepts}", flush = True)
+    print(f"# unknown concepts = {args.sc_out_dim}", flush = True)
 
     ## prepare data ##
     # turn the SMILES strings into PyG objects
@@ -344,7 +344,7 @@ def train_and_evaluate(args):
                 sc_reg = (SC_preds.sum(axis = 1) / SC_preds.size(1)).sum() / SC_preds.size(0)
                 joint_loss += sc_reg * args.lambda_2
 
-            # regularisation for CtoY layer to ensure concept sparsity
+            # L1 regularisation for CtoY layer to ensure concept sparsity
             if args.ctoy_reg:
                 # regularise C-Y weights related to CBM and SC outputs with different strength
                 concept_weights = ModelXtoCtoY.c2y.linear.weight.detach().cpu().numpy()
@@ -355,6 +355,15 @@ def train_and_evaluate(args):
                 joint_loss += l1_norm_cbm * args.alpha + l1_norm_sc * args.beta
                 # l1_norm = sum(sum(p.abs() for p in ModelXtoCtoY.c2y.linear.weight)) / (num_concepts + args.sc_out_dim)
                 # joint_loss += l1_norm * args.lambda_3
+
+            # L2 regularisation for CtoY layer to control weight magnitude
+            if args.ctoy_reg_l2:
+                concept_weights = ModelXtoCtoY.c2y.linear.weight.detach().cpu().numpy()
+                weights_tensor_cbm = torch.tensor(concept_weights[0][:len(concepts)]).to(DEVICE)
+                weights_tensor_sc = torch.tensor(concept_weights[0][len(concepts):]).to(DEVICE)
+                l2_norm_cbm = sum(torch.square(weights_tensor_cbm)) / num_concepts
+                l2_norm_sc = sum(torch.square(weights_tensor_sc)) / args.sc_out_dim
+                joint_loss += l2_norm_cbm * args.alpha + l2_norm_sc * args.beta
                 
             joint_loss.backward()
             optimiser.step()
@@ -381,13 +390,15 @@ def train_and_evaluate(args):
         y_pred = []
         c_true = []
         y_true = []
+        dot_cbm = []
+        dot_sc = []
         with torch.no_grad():
             for batch in val_loader:
                 batch = batch.to(DEVICE)
 
                 # run GNN encoding + CBM
                 embeddings = encoder(batch)
-                XtoY_output, _, XtoC_output, _, _, _ = ModelXtoCtoY(embeddings)
+                XtoY_output, _, XtoC_output, SC_concept_preds, _, _ = ModelXtoCtoY(embeddings)
 
                 # get concept and output predictions per batch
                 y_true.extend(batch.y.cpu())
@@ -395,6 +406,11 @@ def train_and_evaluate(args):
                 c_true.append(batch.concepts.cpu().numpy().reshape(-1, num_concepts))
                 c_pred_binary = (XtoC_output.cpu() > 0.5).float()
                 c_pred.append(c_pred_binary)
+
+                if (i+1) % 10 == 0:
+                    dot_cbm.extend(torch.tensordot(XtoC_output, weights_tensor_cbm, dims = 1).cpu())
+                    if args.side_channel:
+                        dot_sc.extend(torch.tensordot(SC_concept_preds, weights_tensor_sc, dims = 1).cpu())
 
         # calculate output accuracy
         y_acc = accuracy_score(y_true, y_pred)
@@ -412,9 +428,23 @@ def train_and_evaluate(args):
             c_f1 = f1_score(c_true_all, c_pred_all, average = None, zero_division = 0)
             c_f1_mean = np.average(c_f1, weights = concept_rel_log_freq)
 
-            print(f"epoch {i+1} | y accuracy = {y_acc} | y auroc = {y_auroc} | y jaccard = {y_jaccard}")
+            # get weights per concept for SC vs. CBM importance
+            concept_weights = ModelXtoCtoY.c2y.linear.weight.detach().cpu().numpy()
+            weights_tensor_cbm = torch.tensor(concept_weights[0][:num_concepts]).to(DEVICE)
+            weights_tensor_sc = torch.tensor(concept_weights[0][num_concepts:]).to(DEVICE)
+            if args.side_channel:
+                cbm_importance_raw = np.mean(np.abs(dot_cbm))
+                sc_importance_raw = np.mean(np.abs(dot_sc))
+                importance_normaliser = cbm_importance_raw + sc_importance_raw
+                cbm_importance = cbm_importance_raw / importance_normaliser
+                sc_importance = sc_importance_raw / importance_normaliser
+            else:
+                sc_importance = None
+                cbm_importance = None
+
+            print(f"epoch {i+1} | y accuracy = {y_acc} | y auroc = {y_auroc} | y jaccard = {y_jaccard}", flush = True)
             print(f"epoch {i+1} | mean concept acc = {c_acc_mean} | mean concept jaccard = {c_jaccard_mean} | mean concept f1 = {c_f1_mean}", flush = True)
-            
+            print(f"epoch {i+1} | CBM importance = {cbm_importance} | SC importance = {sc_importance}", flush = True)
             
         # record best validation accuracy & save best model config
         if y_acc > best_acc_score:
@@ -427,10 +457,11 @@ def train_and_evaluate(args):
     concept_weights = ModelXtoCtoY.c2y.linear.weight.detach().cpu().numpy()
     unknown_concepts = [f"sc_{i+1}" for i in range(args.sc_out_dim)]
     concept_weights_df = pd.DataFrame(concept_weights, columns = concepts + unknown_concepts)
-    weights_tensor_cbm = torch.tensor(concept_weights[0][:len(concepts)]).to(DEVICE)
-    weights_tensor_sc = torch.tensor(concept_weights[0][len(concepts):]).to(DEVICE)
+    weights_tensor_cbm = torch.tensor(concept_weights[0][:num_concepts]).to(DEVICE)
+    weights_tensor_sc = torch.tensor(concept_weights[0][num_concepts:]).to(DEVICE)
     weight_file = f"{args.output_dir}/concept_weights_{args.model_name}.csv"
     concept_weights_df.to_csv(weight_file, index = False)
+    
 
     ## test loop ##
     encoder = torch.load(f'{args.output_dir}/encoder_{args.model_name}.pth', weights_only = False)
@@ -529,6 +560,7 @@ if __name__ == "__main__":
     ap.add_argument("--lambda-1", type = float, nargs = "?", default = 2.0, help = "weight for concept loss")
     ap.add_argument("--lambda-2", type = float, nargs = "?", default = 0.1, help = "weight for side channel regularisation term")
     ap.add_argument("--ctoy-reg", action = "store_true", help = "swith on L1 regularisation in CtoY layer")
+    ap.add_argument("--ctoy-reg-l2", action = "store_true", help = "swith on L2 regularisation in CtoY layer")
     ap.add_argument("--alpha", type = float, nargs = "?", default = 0.0, help = "weight for C-Y regularisation of weights related to CBM")
     ap.add_argument("--beta", type = float, nargs = "?", default = 0.0, help = "weight for C-Y regularisation of weights related to SC")
     ap.add_argument("--learning-rate", type = float, nargs = "?", default = 2e-4, help = "learning rate for model optimisation")
