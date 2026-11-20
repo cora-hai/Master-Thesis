@@ -1,5 +1,3 @@
-from multiprocessing import Value
-
 import torch
 import torch.nn.functional as F 
 
@@ -32,8 +30,8 @@ if __name__ == "__main__":
     targets = torch.randint(low = 0, high = 2, size = (5, 3), generator = g, dtype = torch.float32)
     concept_counts = targets.sum(dim = 0)
     print(f"{concept_counts}")
-    concept_loss = concept_loss(inputs, targets, concept_counts)
+    c_loss = concept_loss(inputs, targets, concept_counts)
 
     print(f"{inputs = }")
     print(f"{targets = }")
-    print(f"{concept_loss = }")
+    print(f"{c_loss = }")
