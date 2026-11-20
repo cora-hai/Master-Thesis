@@ -264,8 +264,10 @@ def train_and_evaluate(args):
     concepts = X.columns.to_list()
     concept_counts = torch.tensor(X.sum(axis = 0)).to(DEVICE)
     num_concepts = len(concepts)
-    concept_rel_freq = concept_counts / num_concepts
-    concept_rel_log_freq = np.log(concept_rel_freq.cpu())
+    #concept_rel_freq = concept_counts / num_concepts
+    concept_rel_log_freq = np.log(concept_counts.cpu()) / np.log(num_concepts)
+
+    #concept_rel_log_freq = np.log(concept_rel_freq.cpu())
     print(f"# known concepts = {num_concepts}")
     print(f"# unknown concepts = {args.sc_out_dim}")
 
