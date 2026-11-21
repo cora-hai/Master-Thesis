@@ -193,6 +193,8 @@ def extract_node_importance(
     if score_range > 0:
         node_scores = (node_scores - node_scores.min()) / score_range
 
+    #print(f"{node_scores = }")
+
     return node_scores
 
 # Gemini
@@ -320,6 +322,38 @@ def visualize_subgraphx_explanation(
     return atom_weights
 
 
+def get_top_coalition(smiles: str, explanation_results: list, max_nodes: int = 5):
+
+    # get coalition with highest P score from SubgraphX results
+    results = explanation_results[0]
+    results_filtered = [r for r in results if len(r["coalition"]) <= max_nodes]
+    top_coalition_indices = max(results_filtered, key = lambda x: x["P"]/len(x["coalition"]))["coalition"]
+
+    # get molecular graph for molecule
+    mol = Chem.MolFromSmiles(smiles)
+    if mol is None:
+        raise ValueError(f"Invalid SMILES string: {smiles}")
+
+    # Extract matching sub-molecule bonds
+    target_bonds = [
+        bond.GetIdx()
+        for bond in mol.GetBonds()
+        if bond.GetBeginAtomIdx() in top_coalition_indices
+        and bond.GetEndAtomIdx() in top_coalition_indices
+    ]
+
+    # get SMILES of most important substructure
+    if target_bonds:
+        sub_mol = Chem.PathToSubmol(mol, target_bonds)
+        fragment_smiles = Chem.MolToSmiles(sub_mol)
+    else:
+        # Fallback if selected atoms don't share direct bonds
+        fragment_smiles = f"Disconnected atom indices: {top_coalition_indices}"
+
+    return fragment_smiles
+
+
+
 def main(args):
 
     # load model
@@ -360,14 +394,18 @@ def main(args):
                                                                 max_nodes = m)
 
                 smiles_str = df["Drug"][i]
-                #print(f"{smiles_str = }")
-                fragment_smiles = get_top_subgraph_smiles(smiles = smiles_str, 
-                                                        explanation_results = explanation_results, 
-                                                        top_k_atoms = m)
-
-                #print(f"{fragment_smiles}")
-                top_substructures.append(fragment_smiles)
-
+                print(f"{smiles_str = }")
+                
+                if args.node_importance:
+                    fragment_smiles = get_top_subgraph_smiles(smiles = smiles_str, 
+                                                            explanation_results = explanation_results, 
+                                                            top_k_atoms = m)
+                    top_substructures.append(fragment_smiles)
+    
+                else:
+                    top_coalition = get_top_coalition(smiles_str, explanation_results, max_nodes = m)
+                    top_substructures.append(top_coalition)
+                
             df["Top Substructure"] = top_substructures
             print(df["Top Substructure"].value_counts())
 
@@ -380,41 +418,50 @@ def main(args):
         print("getting explanations...")
         top_substructures = []
         for i in range(len(dataset)):
+
             sample = dataset[i]
-            #print(f"{sample = }")
             _, explanation_results, _ = subgraphx_explainer(x = sample.x, 
                                                             edge_index = sample.edge_index, 
                                                             edge_attr = sample.edge_attr, 
-                                                            max_nodes = args.max_nodes)
+                                                            max_nodes = args.max_nodes, )
 
             smiles_str = df["Drug"][i]
-            #print(f"{smiles_str = }")
-            fragment_smiles = get_top_subgraph_smiles(smiles = smiles_str, 
-                                                    explanation_results = explanation_results, 
-                                                    top_k_atoms = args.max_nodes)
+            print(f"{smiles_str = }")
+            
+            if args.node_importance:
+                fragment_smiles = get_top_subgraph_smiles(smiles = smiles_str, 
+                                                        explanation_results = explanation_results, 
+                                                        top_k_atoms = args.max_nodes)
+                top_substructures.append(fragment_smiles)
 
-            #print(f"{fragment_smiles}")
-            top_substructures.append(fragment_smiles)
+            else:
+                top_coalition = get_top_coalition(smiles_str, explanation_results, max_nodes = args.max_nodes)
+                top_substructures.append(top_coalition)
 
+            
         df["Top Substructure"] = top_substructures
         print(df["Top Substructure"].value_counts())
 
         # write dataframe with most important substructure per molecule to csv file
         identifier = os.path.basename(args.data_file)
-        df.to_csv(f"{args.outfolder}/{identifier.replace('.csv', f'_feat-attr_nitro_100_max_nodes.csv')}", index = False, header = True)
+        df.to_csv(f"{args.outfolder}/{identifier.replace('.csv', f'_feat-attr_nitro_10_nodes.csv')}", index = False, header = True)
 
 
 
 if __name__ == "__main__":
+    encoder_file_default = "models/encoder_nitro_SC_27.pth"
+    cbm_file_default = "models/ModelXtoCtoY_nitro_SC_27.pth"
+
     ap = argparse.ArgumentParser()
-    ap.add_argument("--encoder-file", type = str, help = "path to trained GNN encoder")
-    ap.add_argument("--cbm-file", type = str, help = "path to trained CBM with side channel")
+    ap.add_argument("--encoder-file", type = str, nargs = "?", default = encoder_file_default, help = "path to trained GNN encoder")
+    ap.add_argument("--cbm-file", type = str, nargs = "?", default = cbm_file_default, help = "path to trained CBM with side channel")
     ap.add_argument("--num-concepts", type = int, help = "number of concepts in bottleneck")
     ap.add_argument("--sc-out-dim", type = int, help = "number of output nodes in side channel")
     ap.add_argument("--data-file", type = str, help = "path to csv file with data to explain")
     ap.add_argument("--outfolder", type = str, help = "path to directory to write output to")
     ap.add_argument("--max-nodes", type = int, nargs = "?", default = 5, help = "maximal number of nodes in output subgraph")
     ap.add_argument("--max-nodes-range", type = int, nargs = "?", default = None, help = "run explanation for range of max-nodes")
+    ap.add_argument("--node-importance", action = "store_true", help = "switch on node-wise importance extraction instead of coalitions")
     args = ap.parse_args()
 
     main(args)
