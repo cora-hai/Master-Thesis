@@ -316,6 +316,11 @@ def train_and_evaluate(args):
     best_acc_score = -1
     for i in range(args.num_epochs):
 
+        # get weights per concept for SC vs. CBM importance
+        concept_weights = ModelXtoCtoY.c2y.linear.weight.detach().cpu().numpy()
+        weights_tensor_cbm = torch.tensor(concept_weights[0][:num_concepts]).to(DEVICE)
+        weights_tensor_sc = torch.tensor(concept_weights[0][num_concepts:]).to(DEVICE)
+
         # training
         encoder.train()
         ModelXtoCtoY.train()
@@ -347,9 +352,9 @@ def train_and_evaluate(args):
             # L1 regularisation for CtoY layer to ensure concept sparsity
             if args.ctoy_reg:
                 # regularise C-Y weights related to CBM and SC outputs with different strength
-                concept_weights = ModelXtoCtoY.c2y.linear.weight.detach().cpu().numpy()
-                weights_tensor_cbm = torch.tensor(concept_weights[0][:len(concepts)]).to(DEVICE)
-                weights_tensor_sc = torch.tensor(concept_weights[0][len(concepts):]).to(DEVICE)
+                # concept_weights = ModelXtoCtoY.c2y.linear.weight.detach().cpu().numpy()
+                # weights_tensor_cbm = torch.tensor(concept_weights[0][:len(concepts)]).to(DEVICE)
+                # weights_tensor_sc = torch.tensor(concept_weights[0][len(concepts):]).to(DEVICE)
                 l1_norm_cbm = sum(torch.abs(weights_tensor_cbm)) / num_concepts
                 l1_norm_sc = sum(torch.abs(weights_tensor_sc)) / args.sc_out_dim
                 joint_loss += l1_norm_cbm * args.alpha + l1_norm_sc * args.beta
@@ -358,9 +363,9 @@ def train_and_evaluate(args):
 
             # L2 regularisation for CtoY layer to control weight magnitude
             if args.ctoy_reg_l2:
-                concept_weights = ModelXtoCtoY.c2y.linear.weight.detach().cpu().numpy()
-                weights_tensor_cbm = torch.tensor(concept_weights[0][:len(concepts)]).to(DEVICE)
-                weights_tensor_sc = torch.tensor(concept_weights[0][len(concepts):]).to(DEVICE)
+                # concept_weights = ModelXtoCtoY.c2y.linear.weight.detach().cpu().numpy()
+                # weights_tensor_cbm = torch.tensor(concept_weights[0][:len(concepts)]).to(DEVICE)
+                # weights_tensor_sc = torch.tensor(concept_weights[0][len(concepts):]).to(DEVICE)
                 l2_norm_cbm = sum(torch.square(weights_tensor_cbm)) / num_concepts
                 l2_norm_sc = sum(torch.square(weights_tensor_sc)) / args.sc_out_dim
                 joint_loss += l2_norm_cbm * args.alpha + l2_norm_sc * args.beta
@@ -428,10 +433,6 @@ def train_and_evaluate(args):
             c_f1 = f1_score(c_true_all, c_pred_all, average = None, zero_division = 0)
             c_f1_mean = np.average(c_f1, weights = concept_rel_log_freq)
 
-            # get weights per concept for SC vs. CBM importance
-            concept_weights = ModelXtoCtoY.c2y.linear.weight.detach().cpu().numpy()
-            weights_tensor_cbm = torch.tensor(concept_weights[0][:num_concepts]).to(DEVICE)
-            weights_tensor_sc = torch.tensor(concept_weights[0][num_concepts:]).to(DEVICE)
             if args.side_channel:
                 cbm_importance_raw = np.mean(np.abs(dot_cbm))
                 sc_importance_raw = np.mean(np.abs(dot_sc))
@@ -452,6 +453,12 @@ def train_and_evaluate(args):
             torch.save(encoder, f'{args.output_dir}/encoder_{args.model_name}.pth')
             torch.save(ModelXtoCtoY, f'{args.output_dir}/ModelXtoCtoY_{args.model_name}.pth')
 
+
+    ## test loop ##
+    encoder = torch.load(f'{args.output_dir}/encoder_{args.model_name}.pth', weights_only = False)
+    ModelXtoCtoY = torch.load(f'{args.output_dir}/ModelXtoCtoY_{args.model_name}.pth', weights_only = False)
+    encoder.eval()
+    ModelXtoCtoY.eval()
             
     ## get weights per concept for SC vs. CBM importance ##
     concept_weights = ModelXtoCtoY.c2y.linear.weight.detach().cpu().numpy()
@@ -462,12 +469,6 @@ def train_and_evaluate(args):
     weight_file = f"{args.output_dir}/concept_weights_{args.model_name}.csv"
     concept_weights_df.to_csv(weight_file, index = False)
     
-
-    ## test loop ##
-    encoder = torch.load(f'{args.output_dir}/encoder_{args.model_name}.pth', weights_only = False)
-    ModelXtoCtoY = torch.load(f'{args.output_dir}/ModelXtoCtoY_{args.model_name}.pth', weights_only = False)
-    encoder.eval()
-    ModelXtoCtoY.eval()
     c_pred = []
     dot_cbm = []
     dot_sc = []
