@@ -316,7 +316,7 @@ def train_and_evaluate(args):
     best_acc_score = -1
     for i in range(args.num_epochs):
 
-        # get weights per concept for SC vs. CBM importance
+        # get weights per concept for SC vs. CBM importance + regularisation
         concept_weights = ModelXtoCtoY.c2y.linear.weight.detach().cpu().numpy()
         weights_tensor_cbm = torch.tensor(concept_weights[0][:num_concepts]).to(DEVICE)
         weights_tensor_sc = torch.tensor(concept_weights[0][num_concepts:]).to(DEVICE)
@@ -351,21 +351,12 @@ def train_and_evaluate(args):
 
             # L1 regularisation for CtoY layer to ensure concept sparsity
             if args.ctoy_reg:
-                # regularise C-Y weights related to CBM and SC outputs with different strength
-                # concept_weights = ModelXtoCtoY.c2y.linear.weight.detach().cpu().numpy()
-                # weights_tensor_cbm = torch.tensor(concept_weights[0][:len(concepts)]).to(DEVICE)
-                # weights_tensor_sc = torch.tensor(concept_weights[0][len(concepts):]).to(DEVICE)
                 l1_norm_cbm = sum(torch.abs(weights_tensor_cbm)) / num_concepts
                 l1_norm_sc = sum(torch.abs(weights_tensor_sc)) / args.sc_out_dim
                 joint_loss += l1_norm_cbm * args.alpha + l1_norm_sc * args.beta
-                # l1_norm = sum(sum(p.abs() for p in ModelXtoCtoY.c2y.linear.weight)) / (num_concepts + args.sc_out_dim)
-                # joint_loss += l1_norm * args.lambda_3
 
             # L2 regularisation for CtoY layer to control weight magnitude
             if args.ctoy_reg_l2:
-                # concept_weights = ModelXtoCtoY.c2y.linear.weight.detach().cpu().numpy()
-                # weights_tensor_cbm = torch.tensor(concept_weights[0][:len(concepts)]).to(DEVICE)
-                # weights_tensor_sc = torch.tensor(concept_weights[0][len(concepts):]).to(DEVICE)
                 l2_norm_cbm = sum(torch.square(weights_tensor_cbm)) / num_concepts
                 l2_norm_sc = sum(torch.square(weights_tensor_sc)) / args.sc_out_dim
                 joint_loss += l2_norm_cbm * args.alpha + l2_norm_sc * args.beta

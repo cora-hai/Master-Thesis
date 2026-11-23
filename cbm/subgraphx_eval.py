@@ -7,6 +7,7 @@ from IPython.display import SVG, display
 import json
 import argparse
 import os
+from collections import defaultdict
 
 def load_json(filepath: str) -> dict:
     with open(filepath, "r", encoding = "utf-8") as f:
@@ -107,8 +108,9 @@ def check(substructure: str, concepts: dict, use_qq = True) -> list:
 
     matches = []
     for key, val in concept_mols.items():
-        if sub.HasSubstructMatch(val, useQueryQueryMatches = use_qq):
-            matches.append(key)
+        if sub is not None:
+            if sub.HasSubstructMatch(val, useQueryQueryMatches = use_qq):
+                matches.append(key)
 
     return matches
 
@@ -131,11 +133,14 @@ def check_deleted_against_identified(deleted: dict, deleted_matches: dict):
         deleted_matches_list.extend(deleted_matches[m])
     total = len(deleted)
     found_count = 0
-    found = []
+    found = {}
     for concept in deleted.keys():
         if concept in set(deleted_matches_list):
             found_count += 1
-            found.append(concept)
+            found[concept] = 0
+
+    for match in deleted_matches_list:
+        found[match] += 1
 
     return f"{found_count}/{total}", found
 
@@ -191,8 +196,8 @@ def main(args):
     # for each deleted concept check if it was identified somewhere
     discovered = check_deleted_against_identified(deleted, deleted_matches[1])
     print(f"Deleted concepts that were discovered: {discovered[0]}")
-    for elem in discovered[1]:
-        print(elem)
+    for key, val in discovered[1].items():
+        print(key, val, sep = "\t")
 
 
 if __name__ == "__main__":
