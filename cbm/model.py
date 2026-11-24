@@ -490,10 +490,10 @@ def train_and_evaluate(args):
             y_pred_cbm.extend((CBM_task_output.squeeze().cpu() > 0.5).float())
             if args.side_channel:
                 y_pred_sc.extend((SC_task_output.squeeze().cpu() > 0.5).float())
-                sc_pred.extend((SC_concept_preds))
+                sc_pred.extend(SC_concept_preds.cpu())
             c_true.append(batch.concepts.cpu().numpy().reshape(-1, num_concepts))
             #c_pred_binary = (XtoC_output.cpu() > 0.5).float()
-            c_pred.append(XtoC_output)
+            c_pred.append(XtoC_output.cpu())
 
     # calculate concept and output accuracies
     c_true_all = np.vstack(c_true)
