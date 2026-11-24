@@ -551,7 +551,7 @@ def train_and_evaluate(args):
         df_pred[concepts] = c_pred_all.astype(int)
         df_pred[unknown_concepts] = sc_pred_all.astype(int)
 
-        predfile_path = f"{args.data_dir}/test_pred_{args.model_name}.csv"
+        predfile_path = f"{args.output_dir}/test_pred_{args.model_name}.csv"
         df_pred.to_csv(predfile_path, index = False, header = True)
 
     return {"Y test acc": test_y_acc, "Y test auroc": test_y_auroc, "C test acc": test_c_acc_mean}
