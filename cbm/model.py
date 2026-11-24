@@ -14,8 +14,10 @@ from special_loss import concept_loss
 # utils
 import argparse
 import pandas as pd 
+pd.options.mode.chained_assignment = None
 import numpy as np 
 from utils import set_seed
+import os
 
 
 DEVICE = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
@@ -461,6 +463,7 @@ def train_and_evaluate(args):
     concept_weights_df.to_csv(weight_file, index = False)
     
     c_pred = []
+    sc_pred = []
     dot_cbm = []
     dot_sc = []
     y_pred = []
@@ -475,6 +478,8 @@ def train_and_evaluate(args):
             # run GNN encoding + CBM
             embeddings = encoder(batch)
             XtoY_output, _, XtoC_output, SC_concept_preds, SC_task_output, CBM_task_output = ModelXtoCtoY(embeddings)
+            # print(f"{XtoC_output = }")
+            # print(f"{SC_concept_preds = }")
             dot_cbm.extend(torch.tensordot(XtoC_output, weights_tensor_cbm, dims = 1).cpu())
             if args.side_channel:
                 dot_sc.extend(torch.tensordot(SC_concept_preds, weights_tensor_sc, dims = 1).cpu())
@@ -485,13 +490,15 @@ def train_and_evaluate(args):
             y_pred_cbm.extend((CBM_task_output.squeeze().cpu() > 0.5).float())
             if args.side_channel:
                 y_pred_sc.extend((SC_task_output.squeeze().cpu() > 0.5).float())
+                sc_pred.extend((SC_concept_preds))
             c_true.append(batch.concepts.cpu().numpy().reshape(-1, num_concepts))
-            c_pred_binary = (XtoC_output.cpu() > 0.5).float()
-            c_pred.append(c_pred_binary)
+            #c_pred_binary = (XtoC_output.cpu() > 0.5).float()
+            c_pred.append(XtoC_output)
 
     # calculate concept and output accuracies
     c_true_all = np.vstack(c_true)
     c_pred_all = np.vstack(c_pred)
+    sc_pred_all = np.vstack(sc_pred)
     test_y_acc = accuracy_score(y_true, y_pred)
     test_y_acc_cbm = accuracy_score(y_true, y_pred_cbm)
     test_y_auroc = roc_auc_score(y_true, y_pred)
@@ -538,6 +545,15 @@ def train_and_evaluate(args):
     print(f"CBM importance = {cbm_importance}", flush = True)
     print(f"SC importance = {sc_importance}", flush = True)
 
+    if args.pred_file:
+        df_pred = DATA["test"][['Drug_ID', 'Y']]
+        df_pred["Y pred"] = [int(p.item()) for p in y_pred]
+        df_pred[concepts] = c_pred_all.astype(int)
+        df_pred[unknown_concepts] = sc_pred_all.astype(int)
+
+        predfile_path = f"{args.data_dir}/test_pred_{args.model_name}.csv"
+        df_pred.to_csv(predfile_path, index = False, header = True)
+
     return {"Y test acc": test_y_acc, "Y test auroc": test_y_auroc, "C test acc": test_c_acc_mean}
 
 
@@ -562,6 +578,7 @@ if __name__ == "__main__":
     #ap.add_argument("--dropout-p", type = float, nargs = "?", default = 0.0, help = "dropout probability for side channel regularisation")
     ap.add_argument("--num-epochs", type = int, nargs = "?", default = 500, help = "number of epochs to train for")
     ap.add_argument("--seed", type = int, nargs = "?", default = 27, help = "random seed for reproducibility")
+    ap.add_argument("--pred-file", action = "store_true", help = "switch on creation of file with concept and task preds for test set")
     args = ap.parse_args()
 
     set_seed(args.seed)
