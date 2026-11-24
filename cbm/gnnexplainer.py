@@ -257,7 +257,7 @@ if __name__ == "__main__":
     encoder_file_default = "models/encoder_nitro_SC_27.pth"
     cbm_file_default = "models/ModelXtoCtoY_nitro_SC_27.pth"
     data_file_default = "data/mutag_dataset_remove_nitro/test_mutag_subgraphx.csv"
-    outfile_default = "feature_attribution_out_gnnexplainer"
+    outfolder_default = "feature_attribution_out_gnnexplainer"
 
     ap = argparse.ArgumentParser()
     ap.add_argument("--encoder-file", type = str, nargs = "?", default = encoder_file_default, help = "path to trained GNN encoder")
@@ -265,7 +265,7 @@ if __name__ == "__main__":
     ap.add_argument("--data-file", type = str, nargs = "?", default = data_file_default, help = "path to csv file with data to explain")
     ap.add_argument("--num-concepts", type = int, nargs = "?", default = 15, help = "number of concepts in bottleneck")
     ap.add_argument("--sc-out-dim", type = int, nargs = "?", default = 6, help = "number of output nodes in side channel")
-    ap.add_argument("--outfolder", type = str, nargs = "?", default = outfile_default, help = "path to directory to write output to")
+    ap.add_argument("--outfolder", type = str, nargs = "?", default = outfolder_default, help = "path to directory to write output to")
     ap.add_argument("--outfile", type = str, help = "csv file to write results to")
     ap.add_argument("--explainer-epochs", type = int, nargs = "?", default = 200, help = "train explainer model for this many epochs")
     ap.add_argument("--max-nodes", type = int, nargs = "?", default = 6, help = "maximal number of nodes in extracted subgraph")

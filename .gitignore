@@ -10,6 +10,8 @@ glassmol
 classic_ml_methods
 requirements.txt
 feature_attribution_out
+feature_attribution_out_gnnexplainer
 molecule_substructure_images
 subgraphx_eval
+gnnexplainer_eval
 logs
