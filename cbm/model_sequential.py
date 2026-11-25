@@ -1,0 +1,671 @@
+# models + training
+import torch
+import torch.nn as nn
+from torch import Tensor
+from torch.utils.data import Dataset
+from torch_geometric.loader import DataLoader
+from torch_geometric.nn import GINEConv, global_add_pool
+from torch_geometric.utils.smiles import from_smiles
+from sklearn.metrics import roc_auc_score, accuracy_score, jaccard_score, f1_score
+from torchvision.ops import StochasticDepth # for side channel dropout
+
+from special_loss import concept_loss
+
+# utils
+import argparse
+import pandas as pd 
+pd.options.mode.chained_assignment = None
+import numpy as np 
+from utils import set_seed
+import os
+
+
+DEVICE = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+
+# dataset for SMILES input
+class CBMDataset(Dataset):
+    def __init__(self, split, features, tokenizer, DATA):
+        self.data = DATA[split]
+        self.features = features
+        self.tokenizer = tokenizer
+        self.labels = self.data['Y']
+        self.text = self.data["Drug"]
+
+    def __len__(self):
+        return len(self.data)
+    
+    def __getitem__(self, index):
+        tokenized_text = self.tokenizer(
+            self.text[index], 
+            max_length=64,
+            add_special_tokens=True,
+            padding='max_length',
+            return_tensors='pt',
+        )
+
+        return {
+            'input_ids': tokenized_text['input_ids'],
+            'attention_mask': tokenized_text['attention_mask'],
+            'label': torch.tensor(self.labels[index], dtype=torch.int),
+            'concept_labels': self.data.iloc[index][self.features].values.astype(int),
+            'features': self.features
+        }
+
+# GNN embedding model
+class MolNet(nn.Module):
+    def __init__(self, in_channels, hidden_channels):
+        super(MolNet, self).__init__()
+
+        # 3 is the number of edge features from the 'from_smiles' function
+        nn1 = torch.nn.Sequential(torch.nn.Linear(in_channels, hidden_channels),
+            torch.nn.ReLU(),
+            torch.nn.Linear(hidden_channels, hidden_channels))
+        nn2 = torch.nn.Sequential(torch.nn.Linear(hidden_channels, hidden_channels),
+            torch.nn.ReLU(),
+            torch.nn.Linear(hidden_channels, hidden_channels))
+        self.conv1 = GINEConv(nn1, edge_dim=3)
+        self.conv2 = GINEConv(nn2, edge_dim=3)
+        self.mlp = torch.nn.Sequential(
+            torch.nn.Linear(hidden_channels, hidden_channels),
+            torch.nn.ReLU(),
+            torch.nn.Linear(hidden_channels, 1)
+        )
+
+    def forward(self, data):
+        x, edge_index, edge_attr, batch = data.x, data.edge_index, data.edge_attr, data.batch
+        x = self.conv1(x.to(torch.float32), edge_index, edge_attr.to(torch.float32)).relu()
+        x = self.conv2(x.to(torch.float32), edge_index, edge_attr.to(torch.float32)).relu()
+        x = global_add_pool(x, batch)
+        return x
+
+# linear C-Y layer
+class CtoY(nn.Module):
+    def __init__(self, input_dim) -> None:
+        super(CtoY, self).__init__()
+        self.linear = nn.Linear(input_dim, 1)
+        #self.sigmoid = nn.Sigmoid()
+
+    def forward(self, x):
+        x = self.linear(x)
+        #x = self.sigmoid(x)
+        return x
+
+# fully connected module for prediction of one concept
+class FC(nn.Module):
+    def __init__(self, input_dim, hidden_dim = 768*2) -> None:
+        super(FC, self).__init__()
+        self.stack = nn.Sequential(
+            # nn.Linear(input_dim, hidden_dim),
+            # nn.ReLU(),
+            nn.Linear(input_dim, 1)
+        )
+
+    def forward(self, x):
+        return self.stack(x)
+
+# X-C layer with 1 fully connected model per concept
+class XtoC(nn.Module):
+    def __init__(self, num_concepts, in_dims = 768):
+        super(XtoC, self).__init__()
+        self.all_fc = nn.ModuleList()
+        for _ in range(num_concepts):
+            self.all_fc.append(FC(in_dims))
+
+    def forward(self, x):
+        return [fc(x) for fc in self.all_fc]
+
+# side channel with one hidden layer + ReLU activation
+class SideChannel(nn.Module):
+    def __init__(self, input_dim = 768, hidden_dim = 768, out_dim = 1, p_drop = 1.0) -> None:
+        super(SideChannel, self).__init__()
+        self.stack = nn.Sequential(
+            nn.Linear(input_dim, hidden_dim),
+            nn.ReLU(),
+            nn.Linear(hidden_dim, out_dim),
+            StochasticDepth(p = p_drop, mode = "batch")
+        )
+
+    def forward(self, x):
+        return self.stack(x)
+
+# side channel with architecture like XtoC (1 FC per hidden concept)
+class SideChannelXtoC(nn.Module):
+    def __init__(self, input_dim = 768, out_dim = 1) -> None:
+        super(SideChannelXtoC, self).__init__()
+        self.all_fc = nn.ModuleList()
+        for _ in range(out_dim):
+            self.all_fc.append(FC(input_dim))
+
+    def forward(self, x):
+        return [fc(x) for fc in self.all_fc]
+
+
+def gumbel_sigmoid(logits: Tensor, tau: float = 1, hard: bool = False, threshold: float = 0.5) -> Tensor:
+    # gradient approximation for binary concept neurons, based on
+    # 1. https://github.com/pytorch/pytorch/blob/v2.14.0/torch/nn/functional.py#L2219
+    # 2. https://github.com/AngelosNal/PyTorch-Gumbel-Sigmoid/tree/main
+    
+    gumbels = (
+        -torch.empty_like(logits, memory_format=torch.legacy_contiguous_format)
+        .exponential_()
+        .log()
+    )  # ~Gumbel(0,1)
+    gumbels = (logits + gumbels) / tau  # ~Gumbel(logits,tau)
+    y_soft = gumbels.sigmoid()
+
+    if hard:
+        # straight through
+        indices = (y_soft > threshold).nonzero(as_tuple=True)
+        y_hard = torch.zeros_like(logits, memory_format=torch.legacy_contiguous_format)
+        y_hard[indices[0], indices[1]] = 1.0
+        ret = y_hard - y_soft.detach() + y_soft
+    else:
+        # reparametrization trick
+        ret = y_soft
+    return ret
+        
+
+# full model
+class XtoCtoY(nn.Module):
+    def __init__(self, x2c, c2y, side_channel = None, sc_hard = False, num_concepts = 0, sc_out_dim = 0):
+        super(XtoCtoY, self).__init__()
+        self.x2c = x2c
+        self.c2y = c2y
+        self.sc = side_channel
+        self.sc_hard = sc_hard
+        self.sc_out_dim = sc_out_dim
+        self.num_concepts = num_concepts
+        self.sigmoid = nn.Sigmoid()
+
+    def forward(self, x):
+
+        # predict c with Gumbel Sigmoid for handling gradient approximation
+        c_logits_pre = self.x2c(x)
+        c_logits = torch.transpose(torch.stack(c_logits_pre, dim = 0), 0, 1)
+        c_logits = c_logits.reshape(-1, self.num_concepts)
+        #c_preds = self.sigmoid(c_logits)
+        c_preds = gumbel_sigmoid(c_logits, hard = True)
+
+        if self.sc:
+            # get side channel output
+            c_logits_sc_pre = self.sc(x)
+            c_logits_sc = torch.transpose(torch.stack(c_logits_sc_pre, dim = 0), 0, 1)
+            c_logits_sc = c_logits_sc.reshape(-1, self.sc_out_dim)
+            
+            # concatenate X-C and SC outputs to feed into C-Y layer
+            if self.sc_hard:    # binary side channel output
+                c_preds_sc = gumbel_sigmoid(c_logits_sc, hard = True)
+                concat = torch.cat((c_preds, c_preds_sc), dim = 1)
+            else:   # logit side channel output
+                concat = torch.cat((c_preds, c_logits_sc), dim = 1)
+                c_preds_sc = self.sigmoid(c_logits_sc)
+            
+            # get C-Y logits + prediction
+            y_logits = torch.stack([self.c2y(concat[i]) for i in range(concat.size(0))], dim = 0) 
+            y_pred = self.sigmoid(y_logits)
+
+        else:
+            y_logits = torch.stack([self.c2y(c_preds[i]) for i in range(c_preds.size(0))], dim = 0) 
+            y_pred = self.sigmoid(y_logits)
+
+        # get task prediction solely based on concept bottleneck predictions
+        if self.sc:
+            padding_tensor = torch.zeros(self.sc_out_dim).to(DEVICE)
+            y_logits_cb = torch.stack([self.c2y(torch.cat([c_preds[i], padding_tensor], dim = -1)) for i in range(c_preds.size(0))], dim = 0)
+        else:
+            y_logits_cb = torch.stack([self.c2y(c_preds[i]) for i in range(c_preds.size(0))], dim = 0)
+        y_pred_cb = self.sigmoid(y_logits_cb)
+
+        # get task prediction solely based on side channel predictions
+        if self.sc:
+            padding_tensor = torch.zeros(c_preds_sc.size(0), self.num_concepts).to(DEVICE)
+            y_logits_sc = self.c2y(torch.cat([padding_tensor, c_preds_sc], dim = -1))
+            y_pred_sc = self.sigmoid(y_logits_sc)
+        else:
+            y_pred_sc = None
+            c_preds_sc = None
+
+        return [y_pred, c_logits_pre, c_preds, c_preds_sc, y_pred_sc, y_pred_cb]
+
+# function for calling full model
+def full_cbm(num_concepts, in_dims = 768, side_channel = False, sc_hard = False, sc_out_dim = 0, w_cbm = None) -> XtoCtoY:
+
+    # enable sequential training
+    if not w_cbm:
+        x2c_layer = XtoC(num_concepts = num_concepts, in_dims = in_dims)
+    else:
+        x2c_layer = w_cbm
+
+    c2y_layer = CtoY(input_dim = num_concepts + args.sc_out_dim)
+    if side_channel:
+        #sc = SideChannel(input_dim = in_dims, out_dim = args.sc_out_dim, p_drop = args.dropout_p)
+        sc = SideChannelXtoC(input_dim = in_dims, out_dim = args.sc_out_dim)
+        return XtoCtoY(x2c = x2c_layer, c2y = c2y_layer, side_channel = sc, sc_hard = sc_hard, num_concepts = num_concepts, sc_out_dim = sc_out_dim)
+    else:
+        return XtoCtoY(x2c = x2c_layer, c2y = c2y_layer, side_channel = None, num_concepts = num_concepts)
+
+# molecules are PyG objects, so we need to attach the y and concepts to the object
+def attach_y_and_concepts(row, features):
+    row['Drug'].y = torch.tensor(row['Y'], dtype=torch.float32)
+    row['Drug'].target_names = row['Drug_ID']
+    try:
+        row['Drug'].concepts = torch.tensor(np.asarray(row[features].values, dtype=np.float32))
+    except:
+        pass
+    return row['Drug']
+
+
+##########################
+## train & evaluate CBM 
+##########################
+
+def train_and_evaluate(args):
+
+    ## load data ##
+    DATA = {}
+    DATA["train"] = pd.read_csv(f"{args.data_dir}/train_{args.data_type}.csv")
+    DATA["val"] = pd.read_csv(f"{args.data_dir}/val_{args.data_type}.csv")
+    DATA["test"] = pd.read_csv(f"{args.data_dir}/test_{args.data_type}.csv")
+
+    # record concept names + number of concepts
+    X = DATA["train"].drop(columns = ['Drug', 'Y', 'Drug_ID'])
+    concepts = X.columns.to_list()
+    concept_counts = torch.tensor(X.sum(axis = 0)).to(DEVICE)
+    num_concepts = len(concepts)
+    #concept_rel_freq = concept_counts / num_concepts
+    concept_rel_log_freq = np.log(concept_counts.cpu()) / np.log(num_concepts)
+
+    #concept_rel_log_freq = np.log(concept_rel_freq.cpu())
+    print(f"# known concepts = {num_concepts}", flush = True)
+    print(f"# unknown concepts = {args.sc_out_dim}", flush = True)
+
+    ## prepare data ##
+    # turn the SMILES strings into PyG objects
+    DATA["train"]['Drug'] = DATA["train"]['Drug'].apply(from_smiles)
+    DATA["val"]['Drug'] = DATA["val"]['Drug'].apply(from_smiles)
+    DATA["test"]['Drug'] = DATA["test"]['Drug'].apply(from_smiles)  
+
+    # attach the y and concepts to the PyG objects
+    DATA["train"]['Drug'] = DATA["train"].apply(attach_y_and_concepts, args = (concepts,), axis=1)
+    DATA["val"]['Drug'] = DATA["val"].apply(attach_y_and_concepts, args = (concepts,), axis=1)
+    DATA["test"]['Drug'] = DATA["test"].apply(attach_y_and_concepts, args = (concepts,), axis=1)
+
+    # create the data loaders
+    train_loader = DataLoader(DATA["train"]['Drug'], batch_size=32, shuffle=True)
+    val_loader = DataLoader(DATA["val"]['Drug'], batch_size=32, shuffle=False)
+    test_loader = DataLoader(DATA["test"]['Drug'], batch_size=32, shuffle=False)
+
+
+    if args.weighted_loss:
+        ## dynamic per-concept class imbalance weighting ##
+        # compute per-concept positive weights from training data
+        train_concepts = np.vstack([row[concepts].values.astype(float) for _, row in DATA["train"].iterrows()])
+        pos_counts = train_concepts.sum(axis=0)
+        neg_counts = len(train_concepts) - pos_counts
+
+        # calculate ratio (neg / pos) per concept with epsilon to prevent div-by-zero
+        pos_weight_values = np.where(pos_counts > 0, neg_counts / (pos_counts + 1e-5), 1.0)
+        pos_weight_tensor = torch.tensor(pos_weight_values, dtype=torch.float32).to(DEVICE)
+        #print(f"{pos_weight_values = }")
+    else:
+        # take same weight per class
+        pos_weight_tensor = torch.tensor([5.0]).to(DEVICE)
+
+
+    ## initialise everything for X-C training ##
+    ModelXtoC = XtoC(num_concepts = num_concepts)
+    encoder = MolNet(in_channels=DATA["train"]['Drug'][1].x.shape[1], hidden_channels=768).to(DEVICE)
+    optimiser_c = torch.optim.Adam(list(encoder.parameters()) + list(ModelXtoC.parameters()), lr = args.learning_rate)
+    loss_c = torch.nn.BCEWithLogitsLoss(pos_weight = pos_weight_tensor).to(DEVICE) 
+    sigmoid = nn.Sigmoid()
+
+    ## train & validation for X-C layer ##
+    best_acc_score = -1
+    for i in range(args.num_epochs):
+
+        # training
+        encoder.train()
+        ModelXtoC.train()
+        c_loss_list = []
+        for batch in train_loader:
+            batch = batch.to(DEVICE)
+            optimiser_c.zero_grad()
+
+            # run GNN encoding + CBM
+            embeddings = encoder(batch)
+            XtoC_logits = ModelXtoC(embeddings)
+
+            # loss calculation + backpropagation
+            XtoC_logits = torch.stack(XtoC_logits, dim=1).squeeze()
+            if args.special_loss:
+                XtoC_loss = concept_loss(XtoC_logits, batch.concepts.float().view(-1, num_concepts), concept_counts = concept_counts)
+            else:
+                XtoC_loss = loss_c(XtoC_logits, batch.concepts.float().view(-1, num_concepts))
+
+            XtoC_loss.backward()
+            optimiser_c.step()
+
+            c_loss_list.append(XtoC_loss.item())
+        
+        c_loss_mean = np.mean(c_loss_list)
+
+        #run.log({"epoch": i+1, "Y loss": y_loss_mean, "C loss": c_loss_mean})
+
+        # if (i+1) % 5 == 0:
+        #     print(f"epoch {i + 1} | Y loss = {y_loss_mean} | C loss = {c_loss_mean} | joint loss = {joint_loss_mean}", flush = True)
+
+        # validation
+        encoder.eval()
+        ModelXtoC.eval()
+        c_pred = []
+        c_true = []
+        with torch.no_grad():
+            for batch in val_loader:
+                batch = batch.to(DEVICE)
+
+                # run GNN encoding + CBM
+                embeddings = encoder(batch)
+                XtoC_logits = ModelXtoC(embeddings)
+                XtoC_logits = torch.stack(XtoC_logits, dim = 1).squeeze()
+                XtoC_probs = sigmoid(XtoC_logits)
+
+                # get concept and output predictions per batch
+                c_true.append(batch.concepts.cpu().numpy().reshape(-1, num_concepts))
+                c_pred_binary = (XtoC_probs.cpu() > 0.5).float()
+                c_pred.append(c_pred_binary)
+
+        # calculate output accuracy
+        c_true_all = np.vstack(c_true)
+        c_pred_all = np.vstack(c_pred)
+        c_acc = (c_pred_all == c_true_all).mean(axis = 0).tolist()
+        c_acc_mean = np.average(c_acc, weights = concept_rel_log_freq)
+
+        # calculate everything else only every 10th epoch
+        if (i+1) % 10 == 0:
+            c_true_all = np.vstack(c_true)
+            c_pred_all = np.vstack(c_pred)
+            c_acc = (c_pred_all == c_true_all).mean(axis = 0).tolist()
+            c_acc_mean = np.average(c_acc, weights = concept_rel_log_freq)
+            c_jaccard = jaccard_score(c_true_all, c_pred_all, average = None, zero_division = 0.0)
+            c_jaccard_mean = np.average(c_jaccard, weights = concept_rel_log_freq)
+            c_f1 = f1_score(c_true_all, c_pred_all, average = None, zero_division = 0)
+            c_f1_mean = np.average(c_f1, weights = concept_rel_log_freq)
+
+            print(f"epoch {i+1} | mean concept acc = {c_acc_mean} | mean concept jaccard = {c_jaccard_mean} | mean concept f1 = {c_f1_mean}", flush = True)
+
+        # record best validation accuracy & save best model config
+        if c_acc_mean > best_acc_score:
+            best_acc_score = c_acc_mean
+            torch.save(encoder, f'{args.output_dir}/encoder_{args.model_name}.pth')
+            torch.save(ModelXtoC, f'{args.output_dir}/ModelXtoC_{args.model_name}.pth')
+
+    
+    ## load initialise everything for training the rest ##
+    encoder = torch.load(f'{args.output_dir}/encoder_{args.model_name}.pth', weights_only = False)
+    ModelXtoC = torch.load(f'{args.output_dir}/ModelXtoC_{args.model_name}.pth', weights_only = False)
+    ModelXtoCtoY = full_cbm(num_concepts, side_channel = args.side_channel, sc_hard = args.hard_sc, sc_out_dim = args.sc_out_dim, w_cbm = ModelXtoC).to(DEVICE)
+    loss_y = torch.nn.BCELoss().to(DEVICE)  # X-C-Y loss
+
+
+    ## train & validation for the rest of the model
+    # freeze XtoC parameters
+    for name, param in ModelXtoCtoY.named_parameters():
+        if name.startswith("x2c"):
+            param.requires_grad = False
+
+    if args.freeze_encoder:
+        optimiser = torch.optim.Adam([p for p in ModelXtoCtoY.parameters() if p.requires_grad == True], lr = args.learning_rate)
+    else:
+        optimiser = torch.optim.Adam(list(encoder.parameters()) + [p for p in ModelXtoCtoY.parameters() if p.requires_grad == True], lr = args.learning_rate)
+
+    best_acc_score = -1
+    for i in range(args.num_epochs):
+
+        # get weights per concept for SC vs. CBM importance + regularisation
+        concept_weights = ModelXtoCtoY.c2y.linear.weight.detach().cpu().numpy()
+        weights_tensor_cbm = torch.tensor(concept_weights[0][:num_concepts]).to(DEVICE)
+        weights_tensor_sc = torch.tensor(concept_weights[0][num_concepts:]).to(DEVICE)
+
+        # training
+        if not args.freeze_encoder:
+            encoder.train()
+        else:
+            encoder.eval()
+        ModelXtoCtoY.train()
+        y_loss_list = []
+        for batch in train_loader:
+            batch = batch.to(DEVICE)
+            optimiser.zero_grad()
+
+            # run GNN encoding + CBM
+            embeddings = encoder(batch)
+            XtoY_output, _, _, SC_preds, _, _ = ModelXtoCtoY(embeddings)
+
+            # loss calculation + backpropagation
+            XtoY_loss = loss_y(XtoY_output.squeeze(), batch.y.squeeze())
+
+            # joint loss with regularisation for SC output:
+            if args.side_channel:
+                sc_reg = (SC_preds.sum(axis = 1) / SC_preds.size(1)).sum() / SC_preds.size(0)
+                XtoY_loss += sc_reg * args.lambda_2
+
+            # L1 regularisation for CtoY layer to ensure concept sparsity
+            if args.ctoy_reg:
+                l1_norm_cbm = sum(torch.abs(weights_tensor_cbm)) / num_concepts
+                l1_norm_sc = sum(torch.abs(weights_tensor_sc)) / args.sc_out_dim
+                XtoY_loss += l1_norm_cbm * args.alpha + l1_norm_sc * args.beta
+
+            # L2 regularisation for CtoY layer to control weight magnitude
+            if args.ctoy_reg_l2:
+                l2_norm_cbm = sum(torch.square(weights_tensor_cbm)) / num_concepts
+                l2_norm_sc = sum(torch.square(weights_tensor_sc)) / args.sc_out_dim
+                XtoY_loss += l2_norm_cbm * args.alpha + l2_norm_sc * args.beta
+                
+            XtoY_loss.backward()
+            optimiser.step()
+
+            y_loss_list.append(XtoY_loss.item())
+
+
+            #print(f"y loss = {XtoY_loss} | c loss = {XtoC_loss} | s loss = {SC_loss}", flush = True)
+        
+        y_loss_mean = np.mean(y_loss_list)
+
+        #run.log({"epoch": i+1, "Y loss": y_loss_mean, "C loss": c_loss_mean})
+
+        # if (i+1) % 5 == 0:
+        #     print(f"epoch {i + 1} | Y loss = {y_loss_mean} | C loss = {c_loss_mean} | joint loss = {joint_loss_mean}", flush = True)
+
+        # validation
+        encoder.eval()
+        ModelXtoCtoY.eval()
+        y_pred = []
+        y_true = []
+        dot_cbm = []
+        dot_sc = []
+        with torch.no_grad():
+            for batch in val_loader:
+                batch = batch.to(DEVICE)
+
+                # run GNN encoding + CBM
+                embeddings = encoder(batch)
+                XtoY_output, _, XtoC_output, SC_concept_preds, _, _ = ModelXtoCtoY(embeddings)
+
+                # get concept and output predictions per batch
+                y_true.extend(batch.y.cpu())
+                y_pred.extend((XtoY_output.squeeze().cpu() > 0.5).float())
+  
+                if (i+1) % 10 == 0:
+                    dot_cbm.extend(torch.tensordot(XtoC_output, weights_tensor_cbm, dims = 1).cpu())
+                    if args.side_channel:
+                        dot_sc.extend(torch.tensordot(SC_concept_preds, weights_tensor_sc, dims = 1).cpu())
+
+        # calculate output accuracy
+        y_acc = accuracy_score(y_true, y_pred)
+
+        # calculate everything else only every 10th epoch
+        if (i+1) % 10 == 0:
+            y_auroc = roc_auc_score(y_true, y_pred)
+            y_jaccard = jaccard_score(y_true, y_pred, zero_division = 0.0)
+
+            if args.side_channel:
+                cbm_importance_raw = np.mean(np.abs(dot_cbm))
+                sc_importance_raw = np.mean(np.abs(dot_sc))
+                importance_normaliser = cbm_importance_raw + sc_importance_raw
+                cbm_importance = cbm_importance_raw / importance_normaliser
+                sc_importance = sc_importance_raw / importance_normaliser
+            else:
+                sc_importance = None
+                cbm_importance = None
+
+            print(f"epoch {i+1} | y accuracy = {y_acc} | y auroc = {y_auroc} | y jaccard = {y_jaccard}", flush = True)
+            print(f"epoch {i+1} | CBM importance = {cbm_importance} | SC importance = {sc_importance}", flush = True)
+            
+        # record best validation accuracy & save best model config
+        if y_acc > best_acc_score:
+            best_acc_score = y_acc
+            torch.save(ModelXtoCtoY, f'{args.output_dir}/ModelXtoCtoY_{args.model_name}.pth')
+
+
+    ## test loop ##
+    encoder = torch.load(f'{args.output_dir}/encoder_{args.model_name}.pth', weights_only = False)
+    ModelXtoCtoY = torch.load(f'{args.output_dir}/ModelXtoCtoY_{args.model_name}.pth', weights_only = False)
+    encoder.eval()
+    ModelXtoCtoY.eval()
+            
+    ## get weights per concept for SC vs. CBM importance ##
+    concept_weights = ModelXtoCtoY.c2y.linear.weight.detach().cpu().numpy()
+    unknown_concepts = [f"sc_{i+1}" for i in range(args.sc_out_dim)]
+    concept_weights_df = pd.DataFrame(concept_weights, columns = concepts + unknown_concepts)
+    weights_tensor_cbm = torch.tensor(concept_weights[0][:num_concepts]).to(DEVICE)
+    weights_tensor_sc = torch.tensor(concept_weights[0][num_concepts:]).to(DEVICE)
+    weight_file = f"{args.output_dir}/concept_weights_{args.model_name}.csv"
+    concept_weights_df.to_csv(weight_file, index = False)
+    
+    c_pred = []
+    sc_pred = []
+    dot_cbm = []
+    dot_sc = []
+    y_pred = []
+    y_pred_cbm = []
+    y_pred_sc = []
+    c_true = []
+    y_true = []
+    with torch.no_grad():
+        for batch in test_loader:
+            batch = batch.to(DEVICE)
+
+            # run GNN encoding + CBM
+            embeddings = encoder(batch)
+            XtoY_output, _, XtoC_output, SC_concept_preds, SC_task_output, CBM_task_output = ModelXtoCtoY(embeddings)
+            # print(f"{XtoC_output = }")
+            # print(f"{SC_concept_preds = }")
+            dot_cbm.extend(torch.tensordot(XtoC_output, weights_tensor_cbm, dims = 1).cpu())
+            if args.side_channel:
+                dot_sc.extend(torch.tensordot(SC_concept_preds, weights_tensor_sc, dims = 1).cpu())
+
+            # get concept and output predictions per batch
+            y_true.extend(batch.y.cpu())
+            y_pred.extend((XtoY_output.squeeze().cpu() > 0.5).float())
+            y_pred_cbm.extend((CBM_task_output.squeeze().cpu() > 0.5).float())
+            if args.side_channel:
+                y_pred_sc.extend((SC_task_output.squeeze().cpu() > 0.5).float())
+                sc_pred.extend(SC_concept_preds.cpu())
+            c_true.append(batch.concepts.cpu().numpy().reshape(-1, num_concepts))
+            #c_pred_binary = (XtoC_output.cpu() > 0.5).float()
+            c_pred.append(XtoC_output.cpu())
+
+    # calculate concept and output accuracies
+    c_true_all = np.vstack(c_true)
+    c_pred_all = np.vstack(c_pred)
+    if args.side_channel:
+        sc_pred_all = np.vstack(sc_pred)
+    test_y_acc = accuracy_score(y_true, y_pred)
+    test_y_acc_cbm = accuracy_score(y_true, y_pred_cbm)
+    test_y_auroc = roc_auc_score(y_true, y_pred)
+    test_y_auroc_cbm = roc_auc_score(y_true, y_pred_cbm)
+    test_y_jaccard = jaccard_score(y_true, y_pred, zero_division = 0.0)
+    test_y_jaccard_cbm = jaccard_score(y_true, y_pred_cbm, zero_division = 0.0)
+    test_c_acc = (c_pred_all == c_true_all).mean(axis = 0).tolist()
+    test_c_acc_mean = np.average(test_c_acc, weights = concept_rel_log_freq)
+    test_c_jaccard = jaccard_score(c_true_all, c_pred_all, average = None, zero_division = 0.0)
+    test_c_jaccard_mean = np.average(test_c_jaccard, weights = concept_rel_log_freq)
+    test_c_f1 = f1_score(c_true_all, c_pred_all, average = None, zero_division = 0)
+    test_c_f1_mean = np.average(test_c_f1, weights = concept_rel_log_freq)
+    if args.side_channel:
+        test_y_acc_sc = accuracy_score(y_true, y_pred_sc)
+        test_y_auroc_sc = roc_auc_score(y_true, y_pred_sc)
+        test_y_jaccard_sc = jaccard_score(y_true, y_pred_sc, zero_division = 0.0)
+        cbm_importance_raw = np.mean(np.abs(dot_cbm))
+        sc_importance_raw = np.mean(np.abs(dot_sc))
+        importance_normaliser = cbm_importance_raw + sc_importance_raw
+        cbm_importance = cbm_importance_raw / importance_normaliser
+        sc_importance = sc_importance_raw / importance_normaliser
+    else:
+        test_y_acc_sc = None
+        test_y_auroc_sc = None
+        test_y_jaccard_sc = None
+        sc_importance = None
+        cbm_importance = None
+  
+    print(f"test y accuracy = {test_y_acc}", flush = True)
+    print(f"test y accuracy CBM = {test_y_acc_cbm}", flush = True)
+    print(f"test y accuracy SC = {test_y_acc_sc}", flush = True)
+    print(f"test y auroc = {test_y_auroc}", flush = True)
+    print(f"test y auroc CBM = {test_y_auroc_cbm}", flush = True)
+    print(f"test y auroc SC = {test_y_auroc_sc}", flush = True)
+    print(f"test y jaccard = {test_y_jaccard}", flush = True)
+    print(f"test y jaccard CBM = {test_y_jaccard_cbm}", flush = True)
+    print(f"test y jaccard SC = {test_y_jaccard_sc}", flush = True)
+    print(f"test mean concept acc = {test_c_acc_mean}", flush = True)
+    print(f"test mean concept jaccard = {test_c_jaccard_mean}", flush = True)
+    print(f"test mean concept F1 = {test_c_f1_mean}", flush = True)
+    print(f"test concept accuracies = {test_c_acc}", flush = True)
+    print(f"test concept jaccards = {list(test_c_jaccard)}", flush = True)
+    print(f"test concept F1 = {list(test_c_f1)}", flush = True)
+    print(f"CBM importance = {cbm_importance}", flush = True)
+    print(f"SC importance = {sc_importance}", flush = True)
+
+    if args.pred_file:
+        df_pred = DATA["test"][['Drug_ID', 'Y']]
+        df_pred["Y pred"] = [int(p.item()) for p in y_pred]
+        df_pred[concepts] = c_pred_all.astype(int)
+        if args.side_channel:
+            df_pred[unknown_concepts] = sc_pred_all.astype(int)
+
+        predfile_path = f"{args.output_dir}/test_pred_{args.model_name}.csv"
+        df_pred.to_csv(predfile_path, index = False, header = True)
+
+    return {"Y test acc": test_y_acc, "Y test auroc": test_y_auroc, "C test acc": test_c_acc_mean}
+
+
+if __name__ == "__main__":
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--data-dir", type = str, help = "path to input data directory")
+    ap.add_argument("--data-type", type = str, help = "name of dataset")
+    ap.add_argument("--output-dir", type = str, help = "path to directory where outputs and logs will be saved")
+    ap.add_argument("--model-name", type = str, help = "what to include in the name of the model file")
+    ap.add_argument("--weighted-loss", action = "store_true", help = "switch to different loss weights per concept")
+    ap.add_argument("--special-loss", action = "store_true", help = "switch to special concept loss (weighted)")
+    ap.add_argument("--lambda-1", type = float, nargs = "?", default = 2.0, help = "weight for concept loss")
+    ap.add_argument("--lambda-2", type = float, nargs = "?", default = 0.1, help = "weight for side channel regularisation term")
+    ap.add_argument("--ctoy-reg", action = "store_true", help = "swith on L1 regularisation in CtoY layer")
+    ap.add_argument("--ctoy-reg-l2", action = "store_true", help = "swith on L2 regularisation in CtoY layer")
+    ap.add_argument("--alpha", type = float, nargs = "?", default = 0.0, help = "weight for C-Y regularisation of weights related to CBM")
+    ap.add_argument("--beta", type = float, nargs = "?", default = 0.0, help = "weight for C-Y regularisation of weights related to SC")
+    ap.add_argument("--learning-rate-x2c", type = float, nargs = "?", default = 2e-4, help = "learning rate for XtoC optimisation")
+    ap.add_argument("--learning-rate", type = float, nargs = "?", default = 2e-4, help = "learning rate for rest of model optimisation")
+    ap.add_argument("--side-channel", action = "store_true", help = "activate side channel usage")
+    ap.add_argument("--hard-sc", action = "store_true", help = "switch to binary side channel output instead of logits")
+    ap.add_argument("--sc-out-dim", type = int, nargs = "?", default = 0, help = "number of nodes in side channel output")
+    #ap.add_argument("--dropout-p", type = float, nargs = "?", default = 0.0, help = "dropout probability for side channel regularisation")
+    ap.add_argument("--num-epochs-x2c", type = int, nargs = "?", default = 100, help = "number of epochs to train X-C layer for")
+    ap.add_argument("--num-epochs", type = int, nargs = "?", default = 100, help = "number of epochs to train for")
+    ap.add_argument("--seed", type = int, nargs = "?", default = 27, help = "random seed for reproducibility")
+    ap.add_argument("--pred-file", action = "store_true", help = "switch on creation of file with concept and task preds for test set")
+    ap.add_argument("--freeze-encoder", action = "store_true", help = "switch on freezing encoder after XtoC training")
+    args = ap.parse_args()
+
+    set_seed(args.seed)
+
+    train_and_evaluate(args)
