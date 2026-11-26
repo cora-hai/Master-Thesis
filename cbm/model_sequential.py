@@ -321,7 +321,7 @@ def train_and_evaluate(args):
 
     ## train & validation for X-C layer ##
     best_acc_score = -1
-    for i in range(args.num_epochs):
+    for i in range(args.num_epochs_x2c):
 
         # training
         encoder.train()
