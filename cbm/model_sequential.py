@@ -313,7 +313,7 @@ def train_and_evaluate(args):
 
 
     ## initialise everything for X-C training ##
-    ModelXtoC = XtoC(num_concepts = num_concepts)
+    ModelXtoC = XtoC(num_concepts = num_concepts).to(DEVICE)
     encoder = MolNet(in_channels=DATA["train"]['Drug'][1].x.shape[1], hidden_channels=768).to(DEVICE)
     optimiser_c = torch.optim.Adam(list(encoder.parameters()) + list(ModelXtoC.parameters()), lr = args.learning_rate)
     loss_c = torch.nn.BCEWithLogitsLoss(pos_weight = pos_weight_tensor).to(DEVICE) 
